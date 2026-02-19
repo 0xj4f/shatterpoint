@@ -7,12 +7,11 @@ Enforces single-domain scope with concurrency control.
 import asyncio
 import time
 from dataclasses import dataclass, field
-from urllib.parse import urlparse
 
 import httpx
 
+from oxj4f_webcrawler.utils.formatter import print_finding, print_status
 from oxj4f_webcrawler.utils.validator import URLValidator
-from oxj4f_webcrawler.utils.formatter import print_status, print_finding
 
 
 @dataclass

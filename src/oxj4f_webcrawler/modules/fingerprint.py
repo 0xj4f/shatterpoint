@@ -5,11 +5,10 @@ by analyzing HTTP headers, cookies, HTML content, and known paths.
 """
 
 import re
-from importlib import resources
 from pathlib import Path
 
-import yaml
 import httpx
+import yaml
 
 from oxj4f_webcrawler.utils.formatter import print_finding
 

@@ -5,6 +5,7 @@ meta tags, and script sources from HTML content.
 """
 
 import re
+
 from bs4 import BeautifulSoup, Comment
 
 

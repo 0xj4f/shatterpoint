@@ -99,7 +99,7 @@ class Extractor:
         Extract and catalog all URL parameters.
         Parameters are key for finding injection points.
         """
-        from urllib.parse import urlparse, parse_qs
+        from urllib.parse import parse_qs, urlparse
 
         params_found = []
         seen = set()

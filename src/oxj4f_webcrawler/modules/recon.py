@@ -9,7 +9,7 @@ from xml.etree import ElementTree
 
 import httpx
 
-from oxj4f_webcrawler.utils.formatter import print_status, print_finding
+from oxj4f_webcrawler.utils.formatter import print_finding, print_status
 
 
 class ReconModule:
@@ -196,7 +196,7 @@ class ReconModule:
                     print_status(f"Sitemap contains {result['url_count']} URLs")
                     break
 
-            except Exception as e:
+            except Exception:
                 continue
 
         return result

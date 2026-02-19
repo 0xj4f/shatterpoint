@@ -3,8 +3,9 @@ URL Validation & Scope Enforcement
 Ensures we stay within the target domain boundary.
 """
 
-from urllib.parse import urlparse, urljoin, urldefrag, parse_qs
 import re
+from urllib.parse import parse_qs, urldefrag, urljoin, urlparse
+
 import tldextract
 
 

@@ -18,21 +18,21 @@ import httpx
 import yaml
 
 from oxj4f_webcrawler import __version__
-from oxj4f_webcrawler.modules.spider import Spider
-from oxj4f_webcrawler.modules.parser import HTMLParser
 from oxj4f_webcrawler.modules.extractor import Extractor
 from oxj4f_webcrawler.modules.fingerprint import Fingerprinter
+from oxj4f_webcrawler.modules.parser import HTMLParser
 from oxj4f_webcrawler.modules.recon import ReconModule
-from oxj4f_webcrawler.utils.validator import URLValidator
+from oxj4f_webcrawler.modules.spider import Spider
 from oxj4f_webcrawler.utils.formatter import (
+    console,
     print_banner,
-    print_status,
-    print_section,
     print_finding,
+    print_section,
+    print_status,
     print_summary,
     save_report,
-    console,
 )
+from oxj4f_webcrawler.utils.validator import URLValidator
 
 # Suppress SSL warnings (OSCP targets use self-signed certs)
 warnings.filterwarnings("ignore", message="Unverified HTTPS request")

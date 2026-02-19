@@ -7,12 +7,11 @@ import json
 import os
 from datetime import datetime, timezone
 
-from rich.console import Console
-from rich.table import Table
-from rich.panel import Panel
-from rich.tree import Tree
 from rich import box
-
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
+from rich.tree import Tree
 
 console = Console()
 
