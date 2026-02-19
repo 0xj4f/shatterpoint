@@ -6,7 +6,6 @@ Generates structured JSON reports and rich CLI output.
 import json
 import os
 from datetime import datetime, timezone
-from pathlib import Path
 
 from rich.console import Console
 from rich.table import Table
@@ -22,8 +21,8 @@ def print_banner():
     """Print the tool banner."""
     banner = """
 [bold red]╔═══════════════════════════════════════════════════════╗
-║          WEB RECON CRAWLER v1.0 (by 0xj4f)            ║
-║          Attack Surface Mapper & Fingerprinter        ║
+║       0xj4f-webcrawler v1.0                           ║
+║       Attack Surface Mapper & Fingerprinter           ║
 ╚═══════════════════════════════════════════════════════╝[/bold red]
 """
     console.print(banner)

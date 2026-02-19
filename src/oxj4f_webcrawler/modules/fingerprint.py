@@ -5,12 +5,13 @@ by analyzing HTTP headers, cookies, HTML content, and known paths.
 """
 
 import re
+from importlib import resources
 from pathlib import Path
 
 import yaml
 import httpx
 
-from utils.formatter import print_finding
+from oxj4f_webcrawler.utils.formatter import print_finding
 
 
 class Fingerprinter:
@@ -23,8 +24,9 @@ class Fingerprinter:
         self.config = config.get("fingerprint", {})
         self.signatures = {}
 
-        # Load signatures
+        # Load signatures — try package data first, then fallback to relative path
         if signatures_path is None:
+            # Look relative to this file: ../../signatures/fingerprints.yaml
             signatures_path = str(
                 Path(__file__).parent.parent / "signatures" / "fingerprints.yaml"
             )

@@ -11,8 +11,8 @@ from urllib.parse import urlparse
 
 import httpx
 
-from utils.validator import URLValidator
-from utils.formatter import print_status, print_finding
+from oxj4f_webcrawler.utils.validator import URLValidator
+from oxj4f_webcrawler.utils.formatter import print_status, print_finding
 
 
 @dataclass
@@ -131,7 +131,7 @@ class Spider:
 
                 # Extract links and add to queue
                 if result.body and result.status_code < 400:
-                    from modules.parser import HTMLParser
+                    from oxj4f_webcrawler.modules.parser import HTMLParser
                     parser = HTMLParser()
                     links = parser.extract_links(result.body, url)
 

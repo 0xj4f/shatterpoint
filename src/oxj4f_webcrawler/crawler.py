@@ -1,11 +1,10 @@
 """
-Web Recon Crawler - Main Orchestrator
+0xj4f-webcrawler — Main Orchestrator
 Ties together all modules into a single-pass reconnaissance workflow.
 
 Usage:
-    python crawler.py                         # Uses config.yaml
-    python crawler.py -u http://target.com    # Override target URL
-    python crawler.py -u http://target.com -o ./results -v
+    0xj4f-webcrawler -u http://target.com
+    0xj4f-webcrawler -u http://target.com -o ./results -v
 """
 
 import argparse
@@ -18,13 +17,14 @@ from pathlib import Path
 import httpx
 import yaml
 
-from modules.spider import Spider
-from modules.parser import HTMLParser
-from modules.extractor import Extractor
-from modules.fingerprint import Fingerprinter
-from modules.recon import ReconModule
-from utils.validator import URLValidator
-from utils.formatter import (
+from oxj4f_webcrawler import __version__
+from oxj4f_webcrawler.modules.spider import Spider
+from oxj4f_webcrawler.modules.parser import HTMLParser
+from oxj4f_webcrawler.modules.extractor import Extractor
+from oxj4f_webcrawler.modules.fingerprint import Fingerprinter
+from oxj4f_webcrawler.modules.recon import ReconModule
+from oxj4f_webcrawler.utils.validator import URLValidator
+from oxj4f_webcrawler.utils.formatter import (
     print_banner,
     print_status,
     print_section,
@@ -50,14 +50,14 @@ def load_config(config_path: str = "config.yaml") -> dict:
 def parse_args() -> argparse.Namespace:
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
-        description="Web Recon Crawler - Attack Surface Mapper",
+        description="0xj4f-webcrawler — OSCP Recon Attack Surface Mapper",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python crawler.py -u http://10.10.10.1
-  python crawler.py -u http://target.htb -d 5 -p 200
-  python crawler.py -u https://10.10.10.1:8443 -o ./loot -v
-  python crawler.py -c custom_config.yaml
+  0xj4f-webcrawler -u http://10.10.10.1
+  0xj4f-webcrawler -u http://target.htb -d 5 -p 200
+  0xj4f-webcrawler -u https://10.10.10.1:8443 -o ./loot -v
+  0xj4f-webcrawler -c custom_config.yaml
         """,
     )
     parser.add_argument("-u", "--url", help="Target URL (overrides config)")
@@ -70,6 +70,7 @@ Examples:
     parser.add_argument("--no-fingerprint", action="store_true", help="Skip fingerprinting")
     parser.add_argument("--no-recon", action="store_true", help="Skip recon modules")
     parser.add_argument("--timeout", type=int, help="Request timeout in seconds")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     return parser.parse_args()
 
 
@@ -127,8 +128,7 @@ async def run_crawler(config: dict) -> dict:
         seed_urls = [target_url]
         sitemap_urls = results.get("sitemap", {}).get("urls", [])
         if sitemap_urls:
-            # Add in-scope sitemap URLs as seeds
-            for surl in sitemap_urls[:50]:  # Limit to avoid explosion
+            for surl in sitemap_urls[:50]:
                 if validator.is_in_scope(surl):
                     seed_urls.append(surl)
             print_status(f"Added {len(seed_urls) - 1} sitemap URLs as seeds")
@@ -150,7 +150,6 @@ async def run_crawler(config: dict) -> dict:
     # ─── Phase 2: Crawl ─────────────────────────────────────────
     print_section("PHASE 2: Crawling & Discovery")
 
-    # Deduplicate seeds
     seed_urls = list(set(seed_urls))
     crawl_results = await spider.crawl(seed_urls)
 
@@ -249,13 +248,11 @@ async def run_crawler(config: dict) -> dict:
         print_section("PHASE 4: Technology Fingerprinting")
         crawl_detections = fingerprinter.fingerprint_aggregate(crawl_results)
 
-        # Merge with path probe detections
         existing_ids = {t["id"] for t in results["technologies"]}
         for det in crawl_detections:
             if det["id"] not in existing_ids:
                 results["technologies"].append(det)
             else:
-                # Merge match info
                 for existing in results["technologies"]:
                     if existing["id"] == det["id"]:
                         existing["matched_on"].extend(det.get("matched_on", []))
@@ -320,7 +317,7 @@ def main():
     target_url = config.get("target", {}).get("url", "")
     if not target_url or target_url == "http://example.com":
         console.print("[bold red]ERROR:[/bold red] No target URL specified!")
-        console.print("  Use: python crawler.py -u http://target.com")
+        console.print("  Use: 0xj4f-webcrawler -u http://target.com")
         sys.exit(1)
 
     # Ensure scheme

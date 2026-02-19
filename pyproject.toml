@@ -1,0 +1,76 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "0xj4f-webcrawler"
+version = "1.0.0"
+description = "OSCP-focused web reconnaissance crawler — maps attack surfaces, fingerprints technologies, and catalogs every form, endpoint, and parameter on a target domain."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+authors = [
+    { name = "0xj4f" },
+]
+keywords = ["oscp", "recon", "webcrawler", "pentest", "security", "attack-surface"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security",
+    "Topic :: Internet :: WWW/HTTP",
+]
+dependencies = [
+    "httpx[http2]>=0.27.0",
+    "beautifulsoup4>=4.12.0",
+    "lxml>=5.1.0",
+    "pyyaml>=6.0",
+    "rich>=13.7.0",
+    "validators>=0.28.0",
+    "tldextract>=5.1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.3.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/0xj4f/0xj4f-webcrawler"
+Repository = "https://github.com/0xj4f/0xj4f-webcrawler"
+Issues = "https://github.com/0xj4f/0xj4f-webcrawler/issues"
+
+[project.scripts]
+0xj4f-webcrawler = "oxj4f_webcrawler.crawler:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/oxj4f_webcrawler"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/",
+    "tests/",
+    "docs/",
+    "README.md",
+    "LICENSE",
+    "pyproject.toml",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

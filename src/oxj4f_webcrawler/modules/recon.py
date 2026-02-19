@@ -9,7 +9,7 @@ from xml.etree import ElementTree
 
 import httpx
 
-from utils.formatter import print_status, print_finding
+from oxj4f_webcrawler.utils.formatter import print_status, print_finding
 
 
 class ReconModule:
