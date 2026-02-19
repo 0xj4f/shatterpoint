@@ -1,12 +1,11 @@
 """Quick smoke test for all modules."""
 
-from oxj4f_webcrawler.modules.spider import Spider
-from oxj4f_webcrawler.modules.parser import HTMLParser
 from oxj4f_webcrawler.modules.extractor import Extractor
 from oxj4f_webcrawler.modules.fingerprint import Fingerprinter
+from oxj4f_webcrawler.modules.parser import HTMLParser
 from oxj4f_webcrawler.modules.recon import ReconModule
+from oxj4f_webcrawler.modules.spider import Spider
 from oxj4f_webcrawler.utils.validator import URLValidator
-from oxj4f_webcrawler.utils.formatter import print_banner, print_summary, save_report
 
 
 def test_imports():
