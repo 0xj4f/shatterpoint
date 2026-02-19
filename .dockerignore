@@ -1,0 +1,34 @@
+# Docker
+.dockerignore
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Environments
+.env
+.venv
+venv/
+
+# IDE
+.vscode/
+.idea/
+
+# Git
+.git/
+.gitignore
+
+# CI
+.github/
+
+# Output
+output/
+
+# Cache
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
