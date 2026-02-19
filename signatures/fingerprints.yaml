@@ -1,0 +1,306 @@
+# ============================================================
+# Technology Fingerprint Signatures
+# ============================================================
+# Each entry defines detection rules for a technology.
+# Multiple detection methods increase confidence.
+
+wordpress:
+  name: "WordPress"
+  category: "CMS"
+  headers:
+    - header: "x-powered-by"
+      pattern: "(?i)wordpress"
+    - header: "link"
+      pattern: "wp-json"
+  paths:
+    - "/wp-login.php"
+    - "/wp-admin/"
+    - "/wp-content/"
+    - "/wp-includes/"
+    - "/xmlrpc.php"
+    - "/wp-json/wp/v2/"
+  meta:
+    - name: "generator"
+      pattern: "(?i)wordpress\\s*([\\d.]+)?"
+  body:
+    - "wp-content/themes/"
+    - "wp-content/plugins/"
+    - "wp-includes/js/"
+  cookies:
+    - "wordpress_test_cookie"
+    - "wordpress_logged_in"
+
+drupal:
+  name: "Drupal"
+  category: "CMS"
+  headers:
+    - header: "x-generator"
+      pattern: "(?i)drupal"
+    - header: "x-drupal-cache"
+      pattern: ".*"
+  paths:
+    - "/core/misc/drupal.js"
+    - "/sites/default/"
+    - "/core/CHANGELOG.txt"
+    - "/user/login"
+    - "/admin/content"
+  meta:
+    - name: "generator"
+      pattern: "(?i)drupal\\s*([\\d.]+)?"
+  body:
+    - "Drupal.settings"
+    - "drupal.js"
+    - "/sites/all/themes/"
+
+joomla:
+  name: "Joomla"
+  category: "CMS"
+  headers:
+    - header: "x-content-encoded-by"
+      pattern: "(?i)joomla"
+  paths:
+    - "/administrator/"
+    - "/components/"
+    - "/modules/"
+    - "/templates/"
+    - "/configuration.php"
+    - "/language/en-GB/en-GB.xml"
+  meta:
+    - name: "generator"
+      pattern: "(?i)joomla!?\\s*([\\d.]+)?"
+  body:
+    - "/media/system/js/"
+    - "Joomla!"
+
+apache:
+  name: "Apache HTTP Server"
+  category: "Web Server"
+  headers:
+    - header: "server"
+      pattern: "(?i)apache/?([\\d.]+)?"
+  paths:
+    - "/server-status"
+    - "/server-info"
+    - "/.htaccess"
+
+nginx:
+  name: "Nginx"
+  category: "Web Server"
+  headers:
+    - header: "server"
+      pattern: "(?i)nginx/?([\\d.]+)?"
+
+iis:
+  name: "Microsoft IIS"
+  category: "Web Server"
+  headers:
+    - header: "server"
+      pattern: "(?i)microsoft-iis/?([\\d.]+)?"
+    - header: "x-powered-by"
+      pattern: "(?i)asp\\.net"
+  paths:
+    - "/iisstart.htm"
+    - "/aspnet_client/"
+
+php:
+  name: "PHP"
+  category: "Language"
+  headers:
+    - header: "x-powered-by"
+      pattern: "(?i)php/?([\\d.]+)?"
+    - header: "set-cookie"
+      pattern: "PHPSESSID"
+  paths:
+    - "/info.php"
+    - "/phpinfo.php"
+
+tomcat:
+  name: "Apache Tomcat"
+  category: "Application Server"
+  headers:
+    - header: "server"
+      pattern: "(?i)apache[- ]coyote/?([\\d.]+)?"
+  paths:
+    - "/manager/html"
+    - "/host-manager/html"
+    - "/docs/"
+    - "/examples/"
+    - "/WEB-INF/"
+  body:
+    - "Apache Tomcat"
+
+flask:
+  name: "Flask"
+  category: "Framework"
+  headers:
+    - header: "server"
+      pattern: "(?i)werkzeug/?([\\d.]+)?"
+  cookies:
+    - "session"
+  body:
+    - "werkzeug"
+
+django:
+  name: "Django"
+  category: "Framework"
+  headers:
+    - header: "x-frame-options"
+      pattern: "DENY"
+  cookies:
+    - "csrftoken"
+    - "django_language"
+  paths:
+    - "/admin/"
+    - "/static/admin/"
+  body:
+    - "csrfmiddlewaretoken"
+    - "__admin_media_prefix__"
+
+express:
+  name: "Express.js"
+  category: "Framework"
+  headers:
+    - header: "x-powered-by"
+      pattern: "(?i)express"
+
+rails:
+  name: "Ruby on Rails"
+  category: "Framework"
+  headers:
+    - header: "x-powered-by"
+      pattern: "(?i)phusion passenger"
+  cookies:
+    - "_session_id"
+  meta:
+    - name: "csrf-token"
+      pattern: ".*"
+
+laravel:
+  name: "Laravel"
+  category: "Framework"
+  cookies:
+    - "laravel_session"
+    - "XSRF-TOKEN"
+  body:
+    - "laravel"
+
+aspnet:
+  name: "ASP.NET"
+  category: "Framework"
+  headers:
+    - header: "x-powered-by"
+      pattern: "(?i)asp\\.net"
+    - header: "x-aspnet-version"
+      pattern: "([\\d.]+)"
+  cookies:
+    - "ASP.NET_SessionId"
+    - ".ASPXAUTH"
+  body:
+    - "__VIEWSTATE"
+    - "__EVENTVALIDATION"
+    - "aspnetForm"
+
+cloudflare:
+  name: "Cloudflare"
+  category: "CDN/WAF"
+  headers:
+    - header: "server"
+      pattern: "(?i)cloudflare"
+    - header: "cf-ray"
+      pattern: ".*"
+  cookies:
+    - "__cfduid"
+    - "cf_clearance"
+
+jquery:
+  name: "jQuery"
+  category: "JavaScript Library"
+  body:
+    - "jquery"
+    - "jQuery"
+  scripts:
+    - pattern: "jquery[.-]([\\d.]+)(?:\\.min)?\\.js"
+
+bootstrap:
+  name: "Bootstrap"
+  category: "CSS Framework"
+  body:
+    - "bootstrap"
+  scripts:
+    - pattern: "bootstrap[.-]([\\d.]+)(?:\\.min)?\\.js"
+
+react:
+  name: "React"
+  category: "JavaScript Framework"
+  body:
+    - "react"
+    - "_reactRootContainer"
+    - "__NEXT_DATA__"
+
+angular:
+  name: "Angular"
+  category: "JavaScript Framework"
+  body:
+    - "ng-version"
+    - "ng-app"
+    - "angular"
+
+vue:
+  name: "Vue.js"
+  category: "JavaScript Framework"
+  body:
+    - "Vue.js"
+    - "__vue__"
+    - "v-cloak"
+
+phpmyadmin:
+  name: "phpMyAdmin"
+  category: "Database Tool"
+  paths:
+    - "/phpmyadmin/"
+    - "/pma/"
+    - "/phpMyAdmin/"
+  body:
+    - "phpMyAdmin"
+
+webmin:
+  name: "Webmin"
+  category: "Admin Panel"
+  paths:
+    - ":10000"
+  body:
+    - "Webmin"
+
+grafana:
+  name: "Grafana"
+  category: "Monitoring"
+  paths:
+    - "/api/health"
+    - "/login"
+  body:
+    - "grafana"
+
+jenkins:
+  name: "Jenkins"
+  category: "CI/CD"
+  headers:
+    - header: "x-jenkins"
+      pattern: "([\\d.]+)"
+  paths:
+    - "/login"
+    - "/script"
+    - "/manage"
+  body:
+    - "Jenkins"
+
+gitlab:
+  name: "GitLab"
+  category: "Version Control"
+  paths:
+    - "/users/sign_in"
+    - "/api/v4/"
+  meta:
+    - name: "description"
+      pattern: "(?i)gitlab"
+  body:
+    - "gitlab"

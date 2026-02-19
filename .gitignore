@@ -1,0 +1,46 @@
+# Python
+# Byte-code files
+*.pyc
+__pycache__/
+
+# Distribution / packaging
+.Python
+build/
+dist/
+eggs/
+*.egg
+*.egg-info/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.whl
+
+# Environments
+.env
+.venv
+env/
+venv/
+pip-wheel-metadata/
+
+# Editors and IDEs
+# specific to VS Code
+.vscode/
+# specific to PyCharm
+.idea/
+
+# Unit test / coverage reports
+.coverage
+.tox/
+htmlcov/
+.nox/
+
+# Miscellaneous
+.mypy_cache/
+.pytest_cache/
+.hypothesis/
+.spyder-py3/
+
+output

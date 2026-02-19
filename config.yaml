@@ -1,0 +1,58 @@
+# ============================================================
+# Web Recon Crawler - Configuration
+# ============================================================
+
+# Target Configuration
+target:
+  url: "http://example.com"          # Single target URL
+  scope: "strict"                     # strict = exact domain only
+
+# Crawler Settings
+crawler:
+  max_depth: 10                       # Max crawl depth from seed URL
+  max_pages: 500                      # Max pages to crawl (safety limit)
+  concurrency: 15                     # Concurrent requests (sweet spot for OSCP)
+  timeout: 10                         # Request timeout in seconds
+  max_redirects: 3                    # Follow redirects up to N hops
+  delay: 0.1                          # Delay between requests (seconds) - be polite
+  user_agent: "Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/115.0"
+  respect_robots: false               # OSCP = we don't care, but log it
+
+# Extraction Settings
+extract:
+  forms: true
+  api_endpoints: true
+  file_uploads: true
+  comments: true                      # HTML/JS comments
+  emails: true
+  js_endpoints: true                  # Extract URLs from JavaScript
+  metadata: true                      # Meta tags, headers
+
+# Fingerprinting
+fingerprint:
+  enabled: true
+  check_headers: true
+  check_cookies: true
+  check_paths: true                   # Probe known CMS paths
+  check_meta: true
+  check_scripts: true
+
+# Recon Modules
+recon:
+  robots_txt: true
+  sitemap_xml: true
+  security_txt: true
+  common_paths: true                  # Check for /admin, /login, etc.
+  auth_detection: true                # Detect auth mechanisms (no attack)
+
+# Directory Enumeration (optional integration)
+direnum:
+  enabled: false                      # Set true to integrate feroxbuster results
+  feroxbuster_json: ""                # Path to feroxbuster JSON output
+  wordlist: ""                        # Custom wordlist path
+
+# Output
+output:
+  directory: "./output"
+  format: "json"                      # json | both
+  verbose: false                      # Verbose CLI output
