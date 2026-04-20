@@ -1,11 +1,11 @@
 """Quick smoke test for all modules."""
 
-from oxj4f_webcrawler.modules.extractor import Extractor
-from oxj4f_webcrawler.modules.fingerprint import Fingerprinter
-from oxj4f_webcrawler.modules.parser import HTMLParser
-from oxj4f_webcrawler.modules.recon import ReconModule
-from oxj4f_webcrawler.modules.spider import Spider
-from oxj4f_webcrawler.utils.validator import URLValidator
+from shatterpoint.modules.extractor import Extractor
+from shatterpoint.modules.fingerprint import Fingerprinter
+from shatterpoint.modules.parser import HTMLParser
+from shatterpoint.modules.recon import ReconModule
+from shatterpoint.modules.spider import Spider
+from shatterpoint.utils.validator import URLValidator
 
 
 def test_imports():

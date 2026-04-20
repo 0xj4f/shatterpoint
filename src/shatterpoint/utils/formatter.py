@@ -20,8 +20,9 @@ def print_banner():
     """Print the tool banner."""
     banner = """
 [bold red]╔═══════════════════════════════════════════════════════╗
-║       0xj4f-webcrawler v1.0                           ║
+║       shatterpoint v0.1.0                             ║
 ║       Attack Surface Mapper & Fingerprinter           ║
+║       Author: 0xj4f                                   ║
 ╚═══════════════════════════════════════════════════════╝[/bold red]
 """
     console.print(banner)

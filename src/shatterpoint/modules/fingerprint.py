@@ -10,7 +10,7 @@ from pathlib import Path
 import httpx
 import yaml
 
-from oxj4f_webcrawler.utils.formatter import print_finding
+from shatterpoint.utils.formatter import print_finding
 
 
 class Fingerprinter:

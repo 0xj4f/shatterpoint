@@ -14,7 +14,7 @@ RUN pip install --no-cache-dir build \
 FROM python:3.12-slim AS runtime
 
 LABEL maintainer="0xj4f"
-LABEL description="0xj4f-webcrawler — OSCP Recon Attack Surface Mapper"
+LABEL description="shatterpoint — OSCP Recon Attack Surface Mapper"
 
 WORKDIR /app
 
@@ -27,7 +27,7 @@ RUN pip install --no-cache-dir /tmp/*.whl \
 RUN mkdir -p /app/output
 VOLUME ["/app/output"]
 
-ENTRYPOINT ["0xj4f-webcrawler"]
+ENTRYPOINT ["shatterpoint"]
 CMD ["--help"]
 
 # ── Test stage (used by CI only) ─────────────────────────

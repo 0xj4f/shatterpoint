@@ -10,8 +10,8 @@ from dataclasses import dataclass, field
 
 import httpx
 
-from oxj4f_webcrawler.utils.formatter import print_finding, print_status
-from oxj4f_webcrawler.utils.validator import URLValidator
+from shatterpoint.utils.formatter import print_finding, print_status
+from shatterpoint.utils.validator import URLValidator
 
 
 @dataclass
@@ -130,7 +130,7 @@ class Spider:
 
                 # Extract links and add to queue
                 if result.body and result.status_code < 400:
-                    from oxj4f_webcrawler.modules.parser import HTMLParser
+                    from shatterpoint.modules.parser import HTMLParser
                     parser = HTMLParser()
                     links = parser.extract_links(result.body, url)
 

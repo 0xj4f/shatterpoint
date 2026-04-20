@@ -1,10 +1,10 @@
 """
-0xj4f-webcrawler — Main Orchestrator
+shatterpoint — Main Orchestrator
 Ties together all modules into a single-pass reconnaissance workflow.
 
 Usage:
-    0xj4f-webcrawler -u http://target.com
-    0xj4f-webcrawler -u http://target.com -o ./results -v
+    shatterpoint -u http://target.com
+    shatterpoint -u http://target.com -o ./results -v
 """
 
 import argparse
@@ -17,13 +17,13 @@ from pathlib import Path
 import httpx
 import yaml
 
-from oxj4f_webcrawler import __version__
-from oxj4f_webcrawler.modules.extractor import Extractor
-from oxj4f_webcrawler.modules.fingerprint import Fingerprinter
-from oxj4f_webcrawler.modules.parser import HTMLParser
-from oxj4f_webcrawler.modules.recon import ReconModule
-from oxj4f_webcrawler.modules.spider import Spider
-from oxj4f_webcrawler.utils.formatter import (
+from shatterpoint import __version__
+from shatterpoint.modules.extractor import Extractor
+from shatterpoint.modules.fingerprint import Fingerprinter
+from shatterpoint.modules.parser import HTMLParser
+from shatterpoint.modules.recon import ReconModule
+from shatterpoint.modules.spider import Spider
+from shatterpoint.utils.formatter import (
     console,
     print_banner,
     print_finding,
@@ -32,7 +32,7 @@ from oxj4f_webcrawler.utils.formatter import (
     print_summary,
     save_report,
 )
-from oxj4f_webcrawler.utils.validator import URLValidator
+from shatterpoint.utils.validator import URLValidator
 
 # Suppress SSL warnings (OSCP targets use self-signed certs)
 warnings.filterwarnings("ignore", message="Unverified HTTPS request")
@@ -50,14 +50,14 @@ def load_config(config_path: str = "config.yaml") -> dict:
 def parse_args() -> argparse.Namespace:
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
-        description="0xj4f-webcrawler — OSCP Recon Attack Surface Mapper",
+        description="shatterpoint — OSCP Recon Attack Surface Mapper",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  0xj4f-webcrawler -u http://10.10.10.1
-  0xj4f-webcrawler -u http://target.htb -d 5 -p 200
-  0xj4f-webcrawler -u https://10.10.10.1:8443 -o ./loot -v
-  0xj4f-webcrawler -c custom_config.yaml
+  shatterpoint -u http://10.10.10.1
+  shatterpoint -u http://target.htb -d 5 -p 200
+  shatterpoint -u https://10.10.10.1:8443 -o ./loot -v
+  shatterpoint -c custom_config.yaml
         """,
     )
     parser.add_argument("-u", "--url", help="Target URL (overrides config)")
@@ -317,7 +317,7 @@ def main():
     target_url = config.get("target", {}).get("url", "")
     if not target_url or target_url == "http://example.com":
         console.print("[bold red]ERROR:[/bold red] No target URL specified!")
-        console.print("  Use: 0xj4f-webcrawler -u http://target.com")
+        console.print("  Use: shatterpoint -u http://target.com")
         sys.exit(1)
 
     # Ensure scheme
