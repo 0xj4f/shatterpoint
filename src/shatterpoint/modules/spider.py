@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 
 import httpx
 
+from shatterpoint.utils.auth import should_send_auth
 from shatterpoint.utils.formatter import print_finding, print_status
 from shatterpoint.utils.validator import URLValidator
 
@@ -49,6 +50,13 @@ class Spider:
             "Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/115.0",
         )
 
+        # Auth: bearer token is applied per-request (not on the client)
+        # so the manual redirect loop in _fetch can strip it when a hop
+        # leaves the original origin.
+        self.auth_token: str | None = (config.get("auth") or {}).get("token")
+        self.target_scheme = validator.scheme
+        self.target_netloc = validator.target_domain
+
         # State
         self.visited: set[str] = set()
         self.queued: set[str] = set()
@@ -57,6 +65,15 @@ class Spider:
 
         # Semaphore for concurrency control
         self._semaphore = asyncio.Semaphore(self.concurrency)
+
+    def _auth_headers_for(self, url: str) -> dict:
+        """Return Authorization header dict if the token is safe to send to
+        `url` (same origin as target), otherwise an empty dict."""
+        if not self.auth_token:
+            return {}
+        if should_send_auth(self.target_scheme, self.target_netloc, url):
+            return {"Authorization": f"Bearer {self.auth_token}"}
+        return {}
 
     async def crawl(self, seed_urls: list[str] | None = None) -> dict[str, CrawlResult]:
         """
@@ -156,7 +173,11 @@ class Spider:
                 queue.task_done()
 
     async def _fetch(self, client: httpx.AsyncClient, url: str) -> CrawlResult:
-        """Fetch a URL, handling redirects manually to track the chain."""
+        """Fetch a URL, handling redirects manually to track the chain.
+
+        Authorization is evaluated per-hop via should_send_auth so the
+        bearer token is stripped when a redirect leaves the target origin.
+        """
         redirect_chain = []
         current_url = url
         hops = 0
@@ -164,7 +185,7 @@ class Spider:
         while hops <= self.max_redirects:
             try:
                 start = time.monotonic()
-                response = await client.get(current_url)
+                response = await client.get(current_url, headers=self._auth_headers_for(current_url))
                 elapsed = time.monotonic() - start
 
                 if response.is_redirect and hops < self.max_redirects:
@@ -206,13 +227,18 @@ class Spider:
         return CrawlResult(url=url, error="too_many_redirects", redirect_chain=redirect_chain)
 
     async def probe_url(self, client: httpx.AsyncClient, url: str) -> CrawlResult | None:
-        """Probe a single URL (used by recon modules to check known paths)."""
+        """Probe a single URL (used by recon modules to check known paths).
+
+        Uses follow_redirects=True so httpx handles redirects (and strips
+        Authorization on cross-origin hops per RFC 7235).
+        """
         try:
             start = time.monotonic()
             response = await client.get(
                 url,
                 follow_redirects=True,
                 timeout=httpx.Timeout(self.timeout),
+                headers=self._auth_headers_for(url),
             )
             elapsed = time.monotonic() - start
 

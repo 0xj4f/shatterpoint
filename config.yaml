@@ -51,6 +51,13 @@ direnum:
   feroxbuster_json: ""                # Path to feroxbuster JSON output
   wordlist: ""                        # Custom wordlist path
 
+# Authentication (optional)
+# For authenticated crawling. Precedence: --token CLI > SHATTERPOINT_TOKEN env > this field.
+# The token is sent as "Authorization: Bearer <token>" to same-origin requests only;
+# it is automatically stripped on cross-origin redirects.
+auth:
+  token: null                         # JWT or opaque bearer; leave null for unauthenticated crawls
+
 # Output
 output:
   directory: "./output"

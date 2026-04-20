@@ -16,8 +16,8 @@ from rich.tree import Tree
 console = Console()
 
 
-def print_banner():
-    """Print the tool banner."""
+def print_banner(token_display: str = ""):
+    """Print the tool banner, optionally followed by a redacted auth line."""
     banner = """
 [bold red]╔═══════════════════════════════════════════════════════╗
 ║       shatterpoint v0.1.0                             ║
@@ -26,6 +26,8 @@ def print_banner():
 ╚═══════════════════════════════════════════════════════╝[/bold red]
 """
     console.print(banner)
+    if token_display:
+        console.print(f"  [bold yellow]Auth:[/bold yellow] Bearer {token_display}")
 
 
 def print_status(msg: str, style: str = "bold cyan"):

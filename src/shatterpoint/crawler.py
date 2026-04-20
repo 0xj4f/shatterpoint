@@ -23,6 +23,12 @@ from shatterpoint.modules.fingerprint import Fingerprinter
 from shatterpoint.modules.parser import HTMLParser
 from shatterpoint.modules.recon import ReconModule
 from shatterpoint.modules.spider import Spider
+from shatterpoint.utils.auth import (
+    ENV_VAR,
+    redact_token,
+    resolve_token,
+    warn_on_expiry,
+)
 from shatterpoint.utils.formatter import (
     console,
     print_banner,
@@ -70,6 +76,14 @@ Examples:
     parser.add_argument("--no-fingerprint", action="store_true", help="Skip fingerprinting")
     parser.add_argument("--no-recon", action="store_true", help="Skip recon modules")
     parser.add_argument("--timeout", type=int, help="Request timeout in seconds")
+    parser.add_argument(
+        "--token",
+        help=(
+            "Bearer token for authenticated crawling (sent as Authorization: Bearer <token>). "
+            f"Also reads ${ENV_VAR} env var or config 'auth.token'. "
+            "CLI > env > config."
+        ),
+    )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     return parser.parse_args()
 
@@ -116,9 +130,13 @@ async def run_crawler(config: dict) -> dict:
     print_section("PHASE 1: Pre-Crawl Reconnaissance")
 
     recon_cfg = config.get("recon", {})
+    recon_headers = {"User-Agent": config.get("crawler", {}).get("user_agent", "")}
+    auth_token = (config.get("auth") or {}).get("token")
+    if auth_token:
+        recon_headers["Authorization"] = f"Bearer {auth_token}"
     async with httpx.AsyncClient(
         verify=False,
-        headers={"User-Agent": config.get("crawler", {}).get("user_agent", "")},
+        headers=recon_headers,
         limits=httpx.Limits(max_connections=10),
     ) as recon_client:
         recon_results = await recon.run_all(recon_client)
@@ -285,8 +303,6 @@ async def run_crawler(config: dict) -> dict:
 
 def main():
     """Entry point."""
-    print_banner()
-
     args = parse_args()
     config = load_config(args.config)
 
@@ -313,6 +329,16 @@ def main():
             "common_paths": False,
         })
 
+    # Resolve bearer token (CLI > env > config) and stash into config.
+    # The raw token only ever lives in config['auth']['token'] — it is
+    # never placed into the results dict that gets serialized to disk.
+    token = resolve_token(args.token, config)
+    token_display = redact_token(token) if token else ""
+    config.setdefault("auth", {})["token"] = token
+    config["auth"]["token_display"] = token_display
+
+    print_banner(token_display=token_display)
+
     # Validate target
     target_url = config.get("target", {}).get("url", "")
     if not target_url or target_url == "http://example.com":
@@ -327,6 +353,10 @@ def main():
 
     print_status(f"Target: {target_url}")
     print_status(f"Config: {args.config}")
+    if token:
+        warning = warn_on_expiry(token)
+        if warning:
+            print_finding("Auth", f"[bold red]WARNING:[/bold red] {warning}")
     console.print()
 
     # Run

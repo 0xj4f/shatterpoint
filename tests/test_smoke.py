@@ -1,10 +1,21 @@
 """Quick smoke test for all modules."""
 
+import base64
+import json
+import time
+
 from shatterpoint.modules.extractor import Extractor
 from shatterpoint.modules.fingerprint import Fingerprinter
 from shatterpoint.modules.parser import HTMLParser
 from shatterpoint.modules.recon import ReconModule
 from shatterpoint.modules.spider import Spider
+from shatterpoint.utils.auth import (
+    decode_jwt_exp,
+    redact_token,
+    resolve_token,
+    should_send_auth,
+    warn_on_expiry,
+)
 from shatterpoint.utils.validator import URLValidator
 
 
@@ -126,6 +137,138 @@ def test_fingerprinter():
     names = [d["name"] for d in detections]
     assert "Apache HTTP Server" in names
     assert "PHP" in names
+
+
+def _make_jwt(payload: dict) -> str:
+    """Build a JWT-shaped string with the given payload. Signature is fake."""
+    header = base64.urlsafe_b64encode(b'{"alg":"HS256","typ":"JWT"}').rstrip(b"=").decode()
+    body = base64.urlsafe_b64encode(json.dumps(payload).encode()).rstrip(b"=").decode()
+    return f"{header}.{body}.signature"
+
+
+def test_redact_token_typical():
+    token = "eyJhbGci" + "X" * 40 + "6Dc1"
+    redacted = redact_token(token)
+    assert redacted.startswith("eyJh")
+    assert redacted.endswith("6Dc1")
+    assert "…" in redacted
+    assert "X" * 40 not in redacted
+
+
+def test_redact_token_short():
+    # Tokens shorter than 8 chars are fully redacted
+    assert redact_token("abc") == "…"
+    assert redact_token("1234567") == "…"
+    assert redact_token("") == ""
+    assert redact_token(None) == ""
+
+
+def test_redact_token_boundary():
+    # Exactly 8 chars is the smallest length where first4/last4 is shown
+    assert redact_token("12345678") == "1234…5678"
+
+
+def test_resolve_token_cli_wins(monkeypatch):
+    monkeypatch.setenv("SHATTERPOINT_TOKEN", "env-tok")
+    assert resolve_token("cli-tok", {"auth": {"token": "cfg-tok"}}) == "cli-tok"
+
+
+def test_resolve_token_env_over_config(monkeypatch):
+    monkeypatch.setenv("SHATTERPOINT_TOKEN", "env-tok")
+    assert resolve_token(None, {"auth": {"token": "cfg-tok"}}) == "env-tok"
+
+
+def test_resolve_token_config_fallback(monkeypatch):
+    monkeypatch.delenv("SHATTERPOINT_TOKEN", raising=False)
+    assert resolve_token(None, {"auth": {"token": "cfg-tok"}}) == "cfg-tok"
+
+
+def test_resolve_token_none(monkeypatch):
+    monkeypatch.delenv("SHATTERPOINT_TOKEN", raising=False)
+    assert resolve_token(None, {}) is None
+    assert resolve_token("", {}) is None
+    assert resolve_token(None, {"auth": {"token": ""}}) is None
+
+
+def test_jwt_exp_parse_valid():
+    token = _make_jwt({"sub": "u", "exp": 1776412517})
+    assert decode_jwt_exp(token) == 1776412517
+
+
+def test_jwt_exp_parse_opaque():
+    assert decode_jwt_exp("opaque-random-string") is None
+    assert decode_jwt_exp("") is None
+    assert decode_jwt_exp(None) is None
+
+
+def test_jwt_exp_parse_malformed():
+    assert decode_jwt_exp("not.enough") is None
+    bad_b64 = "!!!notbase64!!!"
+    assert decode_jwt_exp(f"hdr.{bad_b64}.sig") is None
+    not_json = base64.urlsafe_b64encode(b"not json").rstrip(b"=").decode()
+    assert decode_jwt_exp(f"hdr.{not_json}.sig") is None
+
+
+def test_jwt_exp_missing_claim():
+    token = _make_jwt({"sub": "u"})
+    assert decode_jwt_exp(token) is None
+
+
+def test_warn_on_expiry_past():
+    token = _make_jwt({"exp": int(time.time()) - 100})
+    msg = warn_on_expiry(token)
+    assert msg is not None
+    assert "expired" in msg.lower()
+
+
+def test_warn_on_expiry_soon():
+    token = _make_jwt({"exp": int(time.time()) + 60})
+    msg = warn_on_expiry(token, warn_window_seconds=600)
+    assert msg is not None
+    assert "expires in" in msg.lower()
+
+
+def test_warn_on_expiry_fresh():
+    token = _make_jwt({"exp": int(time.time()) + 86400})
+    assert warn_on_expiry(token, warn_window_seconds=600) is None
+
+
+def test_warn_on_expiry_opaque():
+    assert warn_on_expiry("opaque-token") is None
+    assert warn_on_expiry(None) is None
+
+
+def test_should_send_auth_same_origin():
+    assert should_send_auth("http", "localhost:3001", "http://localhost:3001/api/x")
+
+
+def test_should_send_auth_different_host():
+    assert not should_send_auth("http", "localhost:3001", "http://evil.com/x")
+
+
+def test_should_send_auth_different_port():
+    assert not should_send_auth("http", "localhost:3001", "http://localhost:3002/x")
+
+
+def test_should_send_auth_different_scheme():
+    assert not should_send_auth("http", "localhost:3001", "https://localhost:3001/x")
+
+
+def test_should_send_auth_default_ports():
+    # http://example.com == http://example.com:80
+    assert should_send_auth("http", "example.com", "http://example.com:80/x")
+    assert should_send_auth("http", "example.com:80", "http://example.com/x")
+    # https://example.com == https://example.com:443
+    assert should_send_auth("https", "example.com", "https://example.com:443/x")
+
+
+def test_should_send_auth_subdomain():
+    assert not should_send_auth("http", "example.com", "http://api.example.com/x")
+
+
+def test_should_send_auth_empty_and_garbage():
+    assert not should_send_auth("http", "example.com", "")
+    assert not should_send_auth("http", "example.com", "not-a-url")
 
 
 def test_fingerprinter_version_extraction():
