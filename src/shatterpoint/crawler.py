@@ -31,6 +31,7 @@ from shatterpoint.utils.auth import (
     warn_on_expiry,
 )
 from shatterpoint.utils.formatter import (
+    BANNER_TEXT,
     console,
     print_banner,
     print_finding,
@@ -45,6 +46,13 @@ from shatterpoint.utils.validator import URLValidator
 warnings.filterwarnings("ignore", message="Unverified HTTPS request")
 
 
+class _BannerArgumentParser(argparse.ArgumentParser):
+    """ArgumentParser that prepends the shatterpoint banner to --help output."""
+
+    def format_help(self) -> str:
+        return f"{BANNER_TEXT}\n\n" + super().format_help()
+
+
 def load_config(config_path: str = "config.yaml") -> dict:
     """Load configuration from YAML file."""
     config_file = Path(config_path)
@@ -56,15 +64,35 @@ def load_config(config_path: str = "config.yaml") -> dict:
 
 def parse_args() -> argparse.Namespace:
     """Parse command-line arguments."""
-    parser = argparse.ArgumentParser(
+    parser = _BannerArgumentParser(
+        prog="shatterpoint",
         description="shatterpoint — OSCP Recon Attack Surface Mapper",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
+  # Basic unauthenticated recon on an OSCP lab box
   shatterpoint -u http://10.10.10.1
+
+  # Limit depth/pages for a fast first pass
   shatterpoint -u http://target.htb -d 5 -p 200
+
+  # Authenticated crawl with a bearer token
+  shatterpoint -u http://target.htb --token $JWT
+
+  # SPA target (React/Vue/Angular/Next.js/Nuxt) — mines bundles & routes
+  shatterpoint -u http://localhost:3001 --token $JWT --spa
+
+  # SPA-only pass, skip noisy path probing on catch-all routers
+  shatterpoint -u http://localhost:3001 --token $JWT --spa --no-recon
+
+  # Save to a specific loot directory, verbose
   shatterpoint -u https://10.10.10.1:8443 -o ./loot -v
+
+  # Config file instead of CLI flags
   shatterpoint -c custom_config.yaml
+
+Environment:
+  SHATTERPOINT_TOKEN    Bearer token fallback when --token is not passed.
         """,
     )
     parser.add_argument("-u", "--url", help="Target URL (overrides config)")

@@ -16,16 +16,18 @@ from rich.tree import Tree
 console = Console()
 
 
-def print_banner(token_display: str = ""):
-    """Print the tool banner, optionally followed by a redacted auth line."""
-    banner = """
-[bold red]╔═══════════════════════════════════════════════════════╗
+# Plain-text banner (no Rich markup). Used both by the Rich-rendered
+# startup banner and by the argparse help formatter, which prints raw text.
+BANNER_TEXT = """╔═══════════════════════════════════════════════════════╗
 ║       shatterpoint v0.1.0                             ║
 ║       Attack Surface Mapper & Fingerprinter           ║
 ║       Author: 0xj4f                                   ║
-╚═══════════════════════════════════════════════════════╝[/bold red]
-"""
-    console.print(banner)
+╚═══════════════════════════════════════════════════════╝"""
+
+
+def print_banner(token_display: str = ""):
+    """Print the tool banner, optionally followed by a redacted auth line."""
+    console.print(f"\n[bold red]{BANNER_TEXT}[/bold red]\n")
     if token_display:
         console.print(f"  [bold yellow]Auth:[/bold yellow] Bearer {token_display}")
 
