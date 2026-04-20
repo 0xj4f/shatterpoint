@@ -235,7 +235,7 @@ react:
   body:
     - "react"
     - "_reactRootContainer"
-    - "__NEXT_DATA__"
+    - "data-reactroot"
 
 angular:
   name: "Angular"
@@ -252,6 +252,28 @@ vue:
     - "Vue.js"
     - "__vue__"
     - "v-cloak"
+
+nextjs:
+  name: "Next.js"
+  category: "JavaScript Framework"
+  body:
+    - "__NEXT_DATA__"
+    - "/_next/static/"
+    - "__next"
+  headers:
+    - header: "x-powered-by"
+      pattern: "(?i)Next\\.js"
+
+nuxt:
+  name: "Nuxt"
+  category: "JavaScript Framework"
+  body:
+    - "__NUXT__"
+    - "__NUXT_JSONP__"
+    - "id=\"__nuxt\""
+  headers:
+    - header: "x-powered-by"
+      pattern: "(?i)Nuxt"
 
 phpmyadmin:
   name: "phpMyAdmin"

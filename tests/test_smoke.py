@@ -8,6 +8,16 @@ from shatterpoint.modules.extractor import Extractor
 from shatterpoint.modules.fingerprint import Fingerprinter
 from shatterpoint.modules.parser import HTMLParser
 from shatterpoint.modules.recon import ReconModule
+from shatterpoint.modules.spa import (
+    detect_framework,
+    enumerate_bundles,
+    extract_chunks,
+    extract_routes,
+    extract_secrets,
+    extract_source_map_url,
+    extract_state_dumps,
+    parse_source_map,
+)
 from shatterpoint.modules.spider import Spider
 from shatterpoint.utils.auth import (
     decode_jwt_exp,
@@ -269,6 +279,191 @@ def test_should_send_auth_subdomain():
 def test_should_send_auth_empty_and_garbage():
     assert not should_send_auth("http", "example.com", "")
     assert not should_send_auth("http", "example.com", "not-a-url")
+
+
+# ─── SPA analyzer tests ───────────────────────────────────────────────
+
+def test_spa_detect_from_techs():
+    techs = [{"id": "react", "name": "React"}]
+    html = '<div id="root"></div>'
+    fw, shell = detect_framework(techs, html)
+    assert fw == "React"
+    assert shell is True
+
+
+def test_spa_detect_no_framework():
+    techs = [{"id": "jquery", "name": "jQuery"}]
+    fw, shell = detect_framework(techs, "<html><body>hello</body></html>")
+    assert fw is None
+    assert shell is False
+
+
+def test_spa_detect_nextjs_from_html_only():
+    # No tech detection, but __NEXT_DATA__ in HTML → detected from shell patterns
+    html = '<html><script id="__NEXT_DATA__" type="application/json">{}</script></html>'
+    fw, shell = detect_framework([], html)
+    assert fw == "Next.js"
+    assert shell is True
+
+
+def test_spa_detect_nuxt_from_html_only():
+    html = '<html><script>window.__NUXT__ = {foo:1};</script></html>'
+    fw, shell = detect_framework([], html)
+    assert fw == "Nuxt"
+    assert shell is True
+
+
+def test_spa_enumerate_bundles_in_scope():
+    html = """
+    <html><body>
+    <script src="/static/js/main.abc.js"></script>
+    <script src="https://target.test/static/js/vendor.def.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/react@18/umd/react.js"></script>
+    <script>console.log("inline")</script>
+    </body></html>
+    """
+    v = URLValidator("http://target.test")
+    parser = HTMLParser()
+    bundles = enumerate_bundles(html, "http://target.test/", v, parser)
+    assert "http://target.test/static/js/main.abc.js" in bundles
+    assert "https://target.test/static/js/vendor.def.js" in bundles
+    assert not any("cdn.jsdelivr" in b for b in bundles)
+
+
+def test_spa_extract_routes_react_router_v6():
+    # Minified-ish React Router v6 shape
+    bundle = 'a.jsx(c,{path:"/admin",element:d}),a.jsx(c,{path:"/users/:id",element:e})'
+    routes = extract_routes(bundle, "React")
+    paths = {r["path"] for r in routes}
+    assert "/admin" in paths
+    assert "/users/:id" in paths
+
+
+def test_spa_extract_routes_react_jsx_unminified():
+    bundle = '<Route path="/dashboard" element={<Dashboard/>} />'
+    routes = extract_routes(bundle, "React")
+    assert any(r["path"] == "/dashboard" for r in routes)
+
+
+def test_spa_extract_routes_vue_router():
+    bundle = "const routes=[{path:'/home',component:H},{path:'/about',component:A}]"
+    routes = extract_routes(bundle, "Vue.js")
+    paths = {r["path"] for r in routes}
+    assert "/home" in paths
+    assert "/about" in paths
+
+
+def test_spa_extract_routes_angular():
+    bundle = "RouterModule.forRoot([{path:'admin',component:A},{path:'login',component:L}])"
+    routes = extract_routes(bundle, "Angular")
+    paths = {r["path"] for r in routes}
+    # Angular paths lack leading slash; normaliser adds it
+    assert "/admin" in paths
+    assert "/login" in paths
+
+
+def test_spa_extract_routes_filters_blocklist():
+    bundle = 'path:"/",path:"*",path:"/valid"'
+    routes = extract_routes(bundle, "React")
+    paths = {r["path"] for r in routes}
+    assert paths == {"/valid"}
+
+
+def test_spa_extract_source_map_url_from_comment():
+    bundle = "var a=1;\n//# sourceMappingURL=main.abc.js.map"
+    url = extract_source_map_url(bundle, "http://t.test/js/main.abc.js")
+    assert url == "http://t.test/js/main.abc.js.map"
+
+
+def test_spa_extract_source_map_url_fallback():
+    bundle = "var a=1; // no source map comment"
+    url = extract_source_map_url(bundle, "http://t.test/js/main.js")
+    assert url == "http://t.test/js/main.js.map"
+
+
+def test_spa_extract_source_map_url_rejects_data_uri():
+    bundle = "//# sourceMappingURL=data:application/json;base64,eyJ2Ijoz"
+    assert extract_source_map_url(bundle, "http://t.test/x.js") is None
+
+
+def test_spa_parse_source_map_valid():
+    sm = json.dumps({
+        "version": 3,
+        "sources": ["src/App.tsx", "src/api.ts"],
+        "sourcesContent": [
+            "import React from 'react';\nfetch('/api/users');\n// content of App",
+            "export const API='/api/v1'; // content of api",
+        ],
+    })
+    parsed = parse_source_map(sm, preview_chars=30)
+    assert parsed is not None
+    assert parsed["sources_count"] == 2
+    assert parsed["sources"] == ["src/App.tsx", "src/api.ts"]
+    # Previews truncated
+    assert len(parsed["sources_preview"][0]["preview"]) <= 30
+
+
+def test_spa_parse_source_map_invalid():
+    assert parse_source_map("") is None
+    assert parse_source_map("not json") is None
+    assert parse_source_map(json.dumps({"no": "sources"})) is None
+    assert parse_source_map(json.dumps({"sources": "not a list"})) is None
+
+
+def test_spa_extract_chunks_webpack():
+    runtime = 'e.p+"static/js/"+({0:"abc123",1:"def456",2:"ghi789"}[t]||t)+".chunk.js"'
+    chunks = extract_chunks(runtime)
+    assert set(chunks) == {"abc123", "def456", "ghi789"}
+
+
+def test_spa_extract_secrets_aws_access_key():
+    bundle = 'const k="AKIAIOSFODNN7EXAMPLE";'
+    found = extract_secrets(bundle, "http://t.test/main.js")
+    types = {s["type"] for s in found}
+    assert "AWS_ACCESS_KEY" in types
+    # Redaction format
+    aws = [s for s in found if s["type"] == "AWS_ACCESS_KEY"][0]
+    assert aws["value_redacted"].startswith("AKIA")
+    assert "IOSFODNN7" not in aws["value_redacted"]
+
+
+def test_spa_extract_secrets_stripe_live():
+    # pk_live_ + 24+ chars
+    bundle = 'stripe("pk_live_abcdefghij1234567890xyzA");'
+    found = extract_secrets(bundle, "http://t.test/main.js")
+    assert any(s["type"] == "STRIPE_LIVE_PUB" for s in found)
+
+
+def test_spa_extract_secrets_generic_api_key():
+    bundle = 'const API_KEY = "super_secret_16_chars_minimum"'
+    found = extract_secrets(bundle, "http://t.test/main.js")
+    assert any(s["type"] == "GENERIC_API_KEY" for s in found)
+
+
+def test_spa_extract_secrets_firebase():
+    # Google API keys are exactly 39 chars: AIza + 35
+    bundle = 'firebaseConfig={apiKey:"AIzaSyDOCAbCdEfGhIjKlMnOpQrStUvWxYz0123"}'
+    found = extract_secrets(bundle, "http://t.test/main.js")
+    types = {s["type"] for s in found}
+    assert "FIREBASE_CONFIG_APIKEY" in types or "GOOGLE_API_KEY" in types
+
+
+def test_spa_extract_state_next_data():
+    html = '<script id="__NEXT_DATA__" type="application/json">{"props":{"user":"alice"}}</script>'
+    dumps = extract_state_dumps(html, preview_chars=50)
+    assert "__NEXT_DATA__" in dumps
+    assert "alice" in dumps["__NEXT_DATA__"]["preview"]
+
+
+def test_spa_extract_state_nuxt():
+    html = '<script>window.__NUXT__ = {"foo":"bar","baz":42};</script>'
+    dumps = extract_state_dumps(html)
+    assert "__NUXT__" in dumps
+    assert "foo" in dumps["__NUXT__"]["preview"]
+
+
+def test_spa_extract_state_none():
+    assert extract_state_dumps("<html><body>nothing</body></html>") == {}
 
 
 def test_fingerprinter_version_extraction():

@@ -22,6 +22,7 @@ from shatterpoint.modules.extractor import Extractor
 from shatterpoint.modules.fingerprint import Fingerprinter
 from shatterpoint.modules.parser import HTMLParser
 from shatterpoint.modules.recon import ReconModule
+from shatterpoint.modules.spa import SPAAnalyzer
 from shatterpoint.modules.spider import Spider
 from shatterpoint.utils.auth import (
     ENV_VAR,
@@ -75,6 +76,16 @@ Examples:
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
     parser.add_argument("--no-fingerprint", action="store_true", help="Skip fingerprinting")
     parser.add_argument("--no-recon", action="store_true", help="Skip recon modules")
+    parser.add_argument(
+        "--spa",
+        action="store_true",
+        help=(
+            "Enable SPA bundle mining (React/Vue/Angular/Next.js/Nuxt). "
+            "Fetches same-origin JS bundles, probes source maps, extracts "
+            "client-side routes, API endpoints, chunks, and baked secrets. "
+            "SPA framework detection runs every scan regardless of this flag."
+        ),
+    )
     parser.add_argument("--timeout", type=int, help="Request timeout in seconds")
     parser.add_argument(
         "--token",
@@ -124,7 +135,10 @@ async def run_crawler(config: dict) -> dict:
         "common_paths": [],
         "all_urls": [],
         "attack_surface": {},
+        "spa": {},
     }
+
+    spa_analyzer = SPAAnalyzer(config, validator, extractor, html_parser)
 
     # ─── Phase 1: Pre-Crawl Recon ───────────────────────────────
     print_section("PHASE 1: Pre-Crawl Reconnaissance")
@@ -164,6 +178,59 @@ async def run_crawler(config: dict) -> dict:
             path_detections = await fingerprinter.probe_known_paths(recon_client, validator.base_url)
             if path_detections:
                 results["technologies"].extend(path_detections)
+
+        # ─── Phase 1.8: SPA Analysis ─────────────────────────────
+        # Fetch landing HTML once (needed for both detection and bundle
+        # enumeration). Use the same recon_client so auth headers apply.
+        print_section("PHASE 1.8: SPA Analysis")
+        landing_html = ""
+        try:
+            landing_resp = await recon_client.get(
+                target_url,
+                follow_redirects=True,
+                timeout=httpx.Timeout(10),
+            )
+            landing_html = landing_resp.text or ""
+        except Exception as e:
+            print_finding("SPA", f"Could not fetch landing HTML: {e}")
+
+        # Run fingerprint-style body matching on the landing HTML so that
+        # React/Vue/Angular/Next.js/Nuxt get tagged even when the tech
+        # path probing phase produced nothing.
+        if landing_html and not config.get("_no_fingerprint"):
+            body_detections = fingerprinter.fingerprint_from_response(
+                target_url, dict(landing_resp.headers), landing_html
+            )
+            existing_ids = {t["id"] for t in results["technologies"]}
+            for det in body_detections:
+                if det["id"] not in existing_ids:
+                    results["technologies"].append(det)
+                    existing_ids.add(det["id"])
+
+        results["spa"] = await spa_analyzer.analyze(
+            recon_client, landing_html, validator.base_url, results["technologies"]
+        )
+
+        # If SPA detected but mining didn't run, nudge the user.
+        if (
+            results["spa"].get("detected")
+            and not results["spa"].get("mining_ran")
+        ):
+            print_finding(
+                "SPA",
+                f"{results['spa']['framework']} detected — "
+                "rerun with --spa to mine bundles, routes, and secrets",
+            )
+
+        # Add SPA-discovered routes to the crawl seed list
+        for route in results["spa"].get("routes", []):
+            route_url = f"{validator.base_url}{route['path']}"
+            if validator.is_in_scope(route_url):
+                seed_urls.append(route_url)
+        if results["spa"].get("routes"):
+            print_status(
+                f"Added {len(results['spa']['routes'])} SPA route(s) as crawl seeds"
+            )
 
     # ─── Phase 2: Crawl ─────────────────────────────────────────
     print_section("PHASE 2: Crawling & Discovery")
@@ -233,10 +300,11 @@ async def run_crawler(config: dict) -> dict:
                 "content_type": crawl_result.content_type,
             })
 
-    # Deduplicate API endpoints
+    # Deduplicate API endpoints (includes SPA-mined endpoints)
+    spa_endpoints = results.get("spa", {}).get("api_endpoints_from_bundles", [])
     seen_apis = set()
     unique_apis = []
-    for api in all_api_endpoints + all_js_endpoints:
+    for api in all_api_endpoints + all_js_endpoints + spa_endpoints:
         key = api.get("url", "")
         if key not in seen_apis:
             seen_apis.add(key)
@@ -321,6 +389,8 @@ def main():
         config.setdefault("output", {})["verbose"] = True
     if args.no_fingerprint:
         config["_no_fingerprint"] = True
+    if args.spa:
+        config.setdefault("spa", {})["enabled"] = True
     if args.no_recon:
         config.setdefault("recon", {}).update({
             "robots_txt": False,

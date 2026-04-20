@@ -159,6 +159,68 @@ def print_summary(results: dict):
             table.add_row(c.get("url", "")[:40], c.get("comment", "")[:60])
         console.print(table)
 
+    # SPA analysis
+    spa = results.get("spa", {})
+    if spa.get("detected"):
+        shell = (
+            "[bold green]shell confirmed[/bold green]"
+            if spa.get("shell_confirmed")
+            else "[dim]shell unconfirmed[/dim]"
+        )
+        mining = (
+            "[bold green]mined[/bold green]"
+            if spa.get("mining_ran")
+            else "[yellow]not mined (use --spa)[/yellow]"
+        )
+        console.print(
+            f"\n[bold magenta]SPA:[/bold magenta] {spa.get('framework', 'unknown')} — {shell}, {mining}"
+        )
+
+        bundles = spa.get("bundles", [])
+        if bundles:
+            table = Table(title=f"SPA Bundles ({len(bundles)})", box=box.ROUNDED, border_style="magenta")
+            table.add_column("Bundle", style="white", max_width=50)
+            table.add_column("Size", style="cyan")
+            table.add_column("Source Map", style="green")
+            table.add_column("Error", style="red")
+            for b in bundles[:20]:
+                size_kb = f"{b.get('size_bytes', 0) // 1024} KB" if b.get("size_bytes") else "—"
+                sm = f"✓ ({b.get('source_files_count', 0)})" if b.get("source_map_found") else "—"
+                table.add_row(
+                    b.get("url", "")[-50:],
+                    size_kb,
+                    sm,
+                    b.get("fetch_error") or "",
+                )
+            console.print(table)
+
+        routes = spa.get("routes", [])
+        if routes:
+            table = Table(title=f"SPA Routes ({len(routes)})", box=box.ROUNDED, border_style="magenta")
+            table.add_column("Path", style="bold white")
+            table.add_column("Source", style="dim")
+            for r in routes[:40]:
+                table.add_row(r.get("path", ""), r.get("source_pattern", ""))
+            console.print(table)
+
+        secrets = spa.get("secrets", [])
+        if secrets:
+            table = Table(title=f"Baked Secrets ({len(secrets)})", box=box.ROUNDED, border_style="red")
+            table.add_column("Type", style="bold red")
+            table.add_column("Value (redacted)", style="yellow")
+            table.add_column("Bundle", style="dim")
+            for s in secrets[:30]:
+                table.add_row(s.get("type", ""), s.get("value_redacted", ""), s.get("bundle", ""))
+            console.print(table)
+
+        chunks = spa.get("chunks", [])
+        if chunks:
+            console.print(f"[bold magenta]SPA Chunks:[/bold magenta] {len(chunks)} (depth-1)")
+
+        state = spa.get("state_dumps", {})
+        if state:
+            console.print(f"[bold magenta]State dumps:[/bold magenta] {', '.join(state.keys())}")
+
     # URL tree
     all_urls = results.get("all_urls", [])
     if all_urls:
