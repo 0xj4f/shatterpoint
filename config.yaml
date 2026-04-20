@@ -51,6 +51,17 @@ direnum:
   feroxbuster_json: ""                # Path to feroxbuster JSON output
   wordlist: ""                        # Custom wordlist path
 
+# SPA (Single Page Application) analysis
+# Framework detection runs every scan; bundle mining is opt-in via --spa
+# or 'enabled: true' below (or auto-triggers when 'auto_when_detected' is set).
+spa:
+  enabled: false                    # same as --spa flag
+  auto_when_detected: false         # run SPA phase automatically if a framework is detected
+  source_maps: true                 # probe .map files for every bundle
+  extract_secrets: true             # curated regex for baked-in secrets
+  max_bundles: 20                   # hard cap per target
+  max_bundle_size_bytes: 5242880    # 5 MB per bundle
+
 # Authentication (optional)
 # For authenticated crawling. Precedence: --token CLI > SHATTERPOINT_TOKEN env > this field.
 # The token is sent as "Authorization: Bearer <token>" to same-origin requests only;
