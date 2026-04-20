@@ -16,15 +16,18 @@ from rich.tree import Tree
 console = Console()
 
 
-def print_banner():
-    """Print the tool banner."""
+def print_banner(token_display: str = ""):
+    """Print the tool banner, optionally followed by a redacted auth line."""
     banner = """
 [bold red]╔═══════════════════════════════════════════════════════╗
-║       0xj4f-webcrawler v1.0                           ║
+║       shatterpoint v0.1.0                             ║
 ║       Attack Surface Mapper & Fingerprinter           ║
+║       Author: 0xj4f                                   ║
 ╚═══════════════════════════════════════════════════════╝[/bold red]
 """
     console.print(banner)
+    if token_display:
+        console.print(f"  [bold yellow]Auth:[/bold yellow] Bearer {token_display}")
 
 
 def print_status(msg: str, style: str = "bold cyan"):

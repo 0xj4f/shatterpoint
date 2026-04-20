@@ -1,19 +1,19 @@
-# 0xj4f-webcrawler
+# shatterpoint
 
 OSCP-focused web reconnaissance crawler — maps attack surfaces, fingerprints technologies, and catalogs every form, endpoint, and parameter on a target domain.
 
 ```bash
-╰─$ 0xj4f-webcrawler --help
+╰─$ shatterpoint --help
 
 ╔═══════════════════════════════════════════════════════╗
-║       0xj4f-webcrawler v1.0                           ║
+║       shatterpoint v1.0                               ║
 ║       Attack Surface Mapper & Fingerprinter           ║
 ╚═══════════════════════════════════════════════════════╝
 
-usage: 0xj4f-webcrawler [-h] [-u URL] [-c CONFIG] [-d DEPTH] [-p PAGES] [-t THREADS] [-o OUTPUT] [-v] [--no-fingerprint] [--no-recon] [--timeout TIMEOUT]
-                        [--version]
+usage: shatterpoint [-h] [-u URL] [-c CONFIG] [-d DEPTH] [-p PAGES] [-t THREADS] [-o OUTPUT] [-v] [--no-fingerprint] [--no-recon] [--timeout TIMEOUT]
+                    [--version]
 
-0xj4f-webcrawler — OSCP Recon Attack Surface Mapper
+shatterpoint — OSCP Recon Attack Surface Mapper
 
 options:
   -h, --help            show this help message and exit
@@ -31,10 +31,10 @@ options:
   --version             show program's version number and exit
 
 Examples:
-  0xj4f-webcrawler -u http://10.10.10.1
-  0xj4f-webcrawler -u http://target.htb -d 5 -p 200
-  0xj4f-webcrawler -u https://10.10.10.1:8443 -o ./loot -v
-  0xj4f-webcrawler -c custom_config.yaml
+  shatterpoint -u http://10.10.10.1
+  shatterpoint -u http://target.htb -d 5 -p 200
+  shatterpoint -u https://10.10.10.1:8443 -o ./loot -v
+  shatterpoint -c custom_config.yaml
 
 ```
 
@@ -57,7 +57,7 @@ Single-pass recon against **one target domain**. No attacks — just mapping.
 ### pipx (recommended)
 
 ```bash
-pipx install git+https://github.com/0xj4f/0xj4f-webcrawler.git
+pipx install git+https://github.com/0xj4f/shatterpoint.git
 pipx install -e . --force --python "$(which python3)"
 
 ```
@@ -65,14 +65,14 @@ pipx install -e . --force --python "$(which python3)"
 ### pip
 
 ```bash
-pip install git+https://github.com/0xj4f/0xj4f-webcrawler.git
+pip install git+https://github.com/0xj4f/shatterpoint.git
 ```
 
 ### From source (dev)
 
 ```bash
-git clone https://github.com/0xj4f/0xj4f-webcrawler.git
-cd 0xj4f-webcrawler
+git clone https://github.com/0xj4f/shatterpoint.git
+cd shatterpoint
 pip install -e ".[dev]"
 ```
 
@@ -82,19 +82,19 @@ pip install -e ".[dev]"
 
 ```bash
 # Basic scan
-0xj4f-webcrawler -u http://10.10.10.1
+shatterpoint -u http://10.10.10.1
 
 # OSCP box with limits
-0xj4f-webcrawler -u http://target.htb -d 5 -p 200
+shatterpoint -u http://target.htb -d 5 -p 200
 
 # Save to specific directory
-0xj4f-webcrawler -u http://10.10.10.1 -o ./loot/box1
+shatterpoint -u http://10.10.10.1 -o ./loot/box1
 
 # Fast scan — skip path probing
-0xj4f-webcrawler -u http://10.10.10.1 --no-recon
+shatterpoint -u http://10.10.10.1 --no-recon
 
 # Use a config file
-0xj4f-webcrawler -c config.yaml
+shatterpoint -c config.yaml
 ```
 
 ---
@@ -102,10 +102,10 @@ pip install -e ".[dev]"
 ## CLI Reference
 
 ```
-usage: 0xj4f-webcrawler [-h] [-u URL] [-c CONFIG] [-d DEPTH] [-p PAGES]
-                        [-t THREADS] [-o OUTPUT] [-v]
-                        [--no-fingerprint] [--no-recon] [--timeout TIMEOUT]
-                        [--version]
+usage: shatterpoint [-h] [-u URL] [-c CONFIG] [-d DEPTH] [-p PAGES]
+                    [-t THREADS] [-o OUTPUT] [-v]
+                    [--no-fingerprint] [--no-recon] [--timeout TIMEOUT]
+                    [--version]
 
 options:
   -u, --url URL          Target URL
@@ -180,10 +180,10 @@ See [docs/schema.md](docs/schema.md) for the full report schema and [docs/featur
 ## Project Structure
 
 ```
-0xj4f-webcrawler/
+shatterpoint/
 ├── pyproject.toml
 ├── config.yaml
-├── src/oxj4f_webcrawler/
+├── src/shatterpoint/
 │   ├── __init__.py
 │   ├── crawler.py              # Main orchestrator & CLI entry point
 │   ├── modules/
@@ -221,7 +221,7 @@ See [docs/schema.md](docs/schema.md) for the full report schema and [docs/featur
 
 ## Adding Custom Fingerprints
 
-Edit `src/oxj4f_webcrawler/signatures/fingerprints.yaml`:
+Edit `src/shatterpoint/signatures/fingerprints.yaml`:
 
 ```yaml
 my_custom_app:

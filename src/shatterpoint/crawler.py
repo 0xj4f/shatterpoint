@@ -1,10 +1,10 @@
 """
-0xj4f-webcrawler — Main Orchestrator
+shatterpoint — Main Orchestrator
 Ties together all modules into a single-pass reconnaissance workflow.
 
 Usage:
-    0xj4f-webcrawler -u http://target.com
-    0xj4f-webcrawler -u http://target.com -o ./results -v
+    shatterpoint -u http://target.com
+    shatterpoint -u http://target.com -o ./results -v
 """
 
 import argparse
@@ -17,13 +17,19 @@ from pathlib import Path
 import httpx
 import yaml
 
-from oxj4f_webcrawler import __version__
-from oxj4f_webcrawler.modules.extractor import Extractor
-from oxj4f_webcrawler.modules.fingerprint import Fingerprinter
-from oxj4f_webcrawler.modules.parser import HTMLParser
-from oxj4f_webcrawler.modules.recon import ReconModule
-from oxj4f_webcrawler.modules.spider import Spider
-from oxj4f_webcrawler.utils.formatter import (
+from shatterpoint import __version__
+from shatterpoint.modules.extractor import Extractor
+from shatterpoint.modules.fingerprint import Fingerprinter
+from shatterpoint.modules.parser import HTMLParser
+from shatterpoint.modules.recon import ReconModule
+from shatterpoint.modules.spider import Spider
+from shatterpoint.utils.auth import (
+    ENV_VAR,
+    redact_token,
+    resolve_token,
+    warn_on_expiry,
+)
+from shatterpoint.utils.formatter import (
     console,
     print_banner,
     print_finding,
@@ -32,7 +38,7 @@ from oxj4f_webcrawler.utils.formatter import (
     print_summary,
     save_report,
 )
-from oxj4f_webcrawler.utils.validator import URLValidator
+from shatterpoint.utils.validator import URLValidator
 
 # Suppress SSL warnings (OSCP targets use self-signed certs)
 warnings.filterwarnings("ignore", message="Unverified HTTPS request")
@@ -50,14 +56,14 @@ def load_config(config_path: str = "config.yaml") -> dict:
 def parse_args() -> argparse.Namespace:
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
-        description="0xj4f-webcrawler — OSCP Recon Attack Surface Mapper",
+        description="shatterpoint — OSCP Recon Attack Surface Mapper",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  0xj4f-webcrawler -u http://10.10.10.1
-  0xj4f-webcrawler -u http://target.htb -d 5 -p 200
-  0xj4f-webcrawler -u https://10.10.10.1:8443 -o ./loot -v
-  0xj4f-webcrawler -c custom_config.yaml
+  shatterpoint -u http://10.10.10.1
+  shatterpoint -u http://target.htb -d 5 -p 200
+  shatterpoint -u https://10.10.10.1:8443 -o ./loot -v
+  shatterpoint -c custom_config.yaml
         """,
     )
     parser.add_argument("-u", "--url", help="Target URL (overrides config)")
@@ -70,6 +76,14 @@ Examples:
     parser.add_argument("--no-fingerprint", action="store_true", help="Skip fingerprinting")
     parser.add_argument("--no-recon", action="store_true", help="Skip recon modules")
     parser.add_argument("--timeout", type=int, help="Request timeout in seconds")
+    parser.add_argument(
+        "--token",
+        help=(
+            "Bearer token for authenticated crawling (sent as Authorization: Bearer <token>). "
+            f"Also reads ${ENV_VAR} env var or config 'auth.token'. "
+            "CLI > env > config."
+        ),
+    )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     return parser.parse_args()
 
@@ -116,9 +130,13 @@ async def run_crawler(config: dict) -> dict:
     print_section("PHASE 1: Pre-Crawl Reconnaissance")
 
     recon_cfg = config.get("recon", {})
+    recon_headers = {"User-Agent": config.get("crawler", {}).get("user_agent", "")}
+    auth_token = (config.get("auth") or {}).get("token")
+    if auth_token:
+        recon_headers["Authorization"] = f"Bearer {auth_token}"
     async with httpx.AsyncClient(
         verify=False,
-        headers={"User-Agent": config.get("crawler", {}).get("user_agent", "")},
+        headers=recon_headers,
         limits=httpx.Limits(max_connections=10),
     ) as recon_client:
         recon_results = await recon.run_all(recon_client)
@@ -285,8 +303,6 @@ async def run_crawler(config: dict) -> dict:
 
 def main():
     """Entry point."""
-    print_banner()
-
     args = parse_args()
     config = load_config(args.config)
 
@@ -313,11 +329,21 @@ def main():
             "common_paths": False,
         })
 
+    # Resolve bearer token (CLI > env > config) and stash into config.
+    # The raw token only ever lives in config['auth']['token'] — it is
+    # never placed into the results dict that gets serialized to disk.
+    token = resolve_token(args.token, config)
+    token_display = redact_token(token) if token else ""
+    config.setdefault("auth", {})["token"] = token
+    config["auth"]["token_display"] = token_display
+
+    print_banner(token_display=token_display)
+
     # Validate target
     target_url = config.get("target", {}).get("url", "")
     if not target_url or target_url == "http://example.com":
         console.print("[bold red]ERROR:[/bold red] No target URL specified!")
-        console.print("  Use: 0xj4f-webcrawler -u http://target.com")
+        console.print("  Use: shatterpoint -u http://target.com")
         sys.exit(1)
 
     # Ensure scheme
@@ -327,6 +353,10 @@ def main():
 
     print_status(f"Target: {target_url}")
     print_status(f"Config: {args.config}")
+    if token:
+        warning = warn_on_expiry(token)
+        if warning:
+            print_finding("Auth", f"[bold red]WARNING:[/bold red] {warning}")
     console.print()
 
     # Run

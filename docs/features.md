@@ -1,6 +1,6 @@
 # Features
 
-Complete feature reference for **0xj4f-webcrawler**.
+Complete feature reference for **shatterpoint**.
 
 ---
 
