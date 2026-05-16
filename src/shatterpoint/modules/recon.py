@@ -160,7 +160,12 @@ class ReconModule:
                     timeout=httpx.Timeout(10),
                 )
 
-                if response.status_code == 200 and ("xml" in response.headers.get("content-type", "") or response.text.strip().startswith("<?xml")):
+                content_type = response.headers.get("content-type", "")
+                looks_like_xml = (
+                    "xml" in content_type
+                    or response.text.strip().startswith("<?xml")
+                )
+                if response.status_code == 200 and looks_like_xml:
                     result["found"] = True
                     print_status(f"Sitemap found: {url}")
 

@@ -321,7 +321,10 @@ async def run_crawler(config: dict) -> dict:
 
         # Detect auth mechanisms + security headers (separate taxonomies)
         if recon_cfg.get("auth_detection", True):
-            page_forms = html_parser.extract_forms(body, url) if not extract_cfg.get("forms") else [f for f in all_forms if f["found_on"] == url]
+            if extract_cfg.get("forms"):
+                page_forms = [f for f in all_forms if f["found_on"] == url]
+            else:
+                page_forms = html_parser.extract_forms(body, url)
             auth = recon.detect_auth_mechanisms(url, headers, body, page_forms)
             all_auth.extend(auth)
             all_security_headers.extend(recon.detect_security_headers(url, headers))

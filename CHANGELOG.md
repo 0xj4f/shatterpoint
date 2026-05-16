@@ -11,7 +11,8 @@ auto-increments. See [README — Release process](README.md) for details.
 
 ## [Unreleased]
 
-_No changes yet._
+### Fixed
+- Three pre-existing E501 lint errors (long lines in `crawler.py`, `extractor.py`, `recon.py`) that were blocking the initial CI run.
 
 ---
 

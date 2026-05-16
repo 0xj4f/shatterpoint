@@ -13,7 +13,12 @@ class Extractor:
     # Patterns for finding endpoints in JavaScript
     JS_URL_PATTERNS = [
         # Quoted strings that look like paths
-        re.compile(r'''["'](/(?:api|rest|graphql|v[0-9]+|ajax|ws|webhook|service|endpoint)[^\s"'<>]*?)["']''', re.IGNORECASE),
+        re.compile(
+            r'''["']'''
+            r'''(/(?:api|rest|graphql|v[0-9]+|ajax|ws|webhook|service|endpoint)[^\s"'<>]*?)'''
+            r'''["']''',
+            re.IGNORECASE,
+        ),
         # fetch() calls
         re.compile(r'''fetch\s*\(\s*["']([^"']+?)["']''', re.IGNORECASE),
         # XMLHttpRequest.open
