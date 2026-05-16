@@ -13,16 +13,31 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.tree import Tree
 
+from shatterpoint import __version__
+
 console = Console()
+
+
+def _build_banner_text(version: str) -> str:
+    """Build the banner string with the version line left-aligned to
+    match the other rows (7-space indent, right-padded to width 55)."""
+    line_a = (f"       shatterpoint v{version}").ljust(55)
+    # If a wildly-long dev version overflows the box, truncate gracefully
+    # so the box still renders correctly.
+    if len(line_a) > 55:
+        line_a = line_a[:52] + "..."
+    return (
+        "╔═══════════════════════════════════════════════════════╗\n"
+        f"║{line_a}║\n"
+        "║       Attack Surface Mapper & Fingerprinter           ║\n"
+        "║       Author: 0xj4f                                   ║\n"
+        "╚═══════════════════════════════════════════════════════╝"
+    )
 
 
 # Plain-text banner (no Rich markup). Used both by the Rich-rendered
 # startup banner and by the argparse help formatter, which prints raw text.
-BANNER_TEXT = """╔═══════════════════════════════════════════════════════╗
-║       shatterpoint v0.1.0                             ║
-║       Attack Surface Mapper & Fingerprinter           ║
-║       Author: 0xj4f                                   ║
-╚═══════════════════════════════════════════════════════╝"""
+BANNER_TEXT = _build_banner_text(__version__)
 
 
 def print_banner(token_display: str = ""):
@@ -124,12 +139,25 @@ def print_summary(results: dict):
             table.add_row(f.get("url", ""), str(f.get("status_code", "")))
         console.print(table)
 
-    # Auth Mechanisms
+    # Auth Mechanisms (auth only — security headers shown separately)
     auth = results.get("auth_mechanisms", [])
     if auth:
         tree = Tree("[bold red]Authentication Mechanisms[/bold red]")
         for a in auth:
-            tree.add(f"[yellow]{a.get('type', '')}[/yellow] - {a.get('detail', '')} [dim]({a.get('url', '')})[/dim]")
+            tree.add(
+                f"[yellow]{a.get('type', '')}[/yellow] - {a.get('detail', '')} "
+                f"[dim]({a.get('url', '')})[/dim]"
+            )
+        console.print(tree)
+
+    # Security Headers (defensive posture — distinct from auth)
+    sec_headers = results.get("security_headers", [])
+    if sec_headers:
+        tree = Tree("[bold blue]Security Headers[/bold blue]")
+        for sh in sec_headers:
+            tree.add(
+                f"[cyan]{sh.get('name', '')}[/cyan]: {sh.get('value', '')[:120]}"
+            )
         console.print(tree)
 
     # Robots/Sitemap

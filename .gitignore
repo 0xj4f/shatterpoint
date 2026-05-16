@@ -44,3 +44,6 @@ htmlcov/
 .spyder-py3/
 
 output
+
+# hatch-vcs writes the resolved version here at build time; never commit.
+src/shatterpoint/_version.py

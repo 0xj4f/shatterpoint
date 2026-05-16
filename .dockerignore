@@ -6,8 +6,10 @@ __pycache__/
 *.pyc
 *.pyo
 *.egg-info/
-dist/
 build/
+# NOTE: dist/ is intentionally NOT ignored — CI builds the wheel
+# on the runner (so hatch-vcs can read the git tag) and the Docker
+# image installs that pre-built wheel from dist/.
 
 # Environments
 .env

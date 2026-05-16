@@ -1,10 +1,10 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
 [project]
 name = "shatterpoint"
-version = "0.1.0"
+dynamic = ["version"]
 description = "OSCP-focused web reconnaissance crawler — maps attack surfaces, fingerprints technologies, and catalogs every form, endpoint, and parameter on a target domain."
 readme = "README.md"
 license = "MIT"
@@ -51,6 +51,29 @@ Issues = "https://github.com/0xj4f/shatterpoint/issues"
 
 [project.scripts]
 shatterpoint = "shatterpoint.crawler:main"
+
+# Version derived from git tags via hatch-vcs. CI computes the next
+# vMAJOR.MINOR.PATCH tag from the MAJOR_VERSION / MINOR_VERSION repo
+# variables; hatch-vcs reads `git describe` at build time and stamps
+# the wheel with the resolved version. No version string lives in
+# source code, so there's no commit-back-to-main loop and no risk of
+# the in-tree __version__ diverging from the published tag.
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.version.raw-options]
+# version_scheme: tagged commits → exact tag; commits past a tag →
+#   "<tag>.postN.devM" (informative without inventing a fake "next").
+# local_scheme: drop the +gHASH.dDATE suffix so banner / --version
+#   stay readable for end users on production installs.
+version_scheme = "no-guess-dev"
+local_scheme = "no-local-version"
+
+[tool.hatch.build.hooks.vcs]
+# Writes the resolved version into the package as a Python file so
+# the runtime can fall back to it when importlib.metadata isn't
+# populated (e.g. running from a source checkout). Gitignored.
+version-file = "src/shatterpoint/_version.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/shatterpoint"]

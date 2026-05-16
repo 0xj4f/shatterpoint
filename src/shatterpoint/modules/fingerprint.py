@@ -10,7 +10,55 @@ from pathlib import Path
 import httpx
 import yaml
 
-from shatterpoint.utils.formatter import print_finding
+from shatterpoint.utils.baseline import fetch_baseline
+from shatterpoint.utils.formatter import print_finding, print_status
+
+
+def dedup_technologies(techs: list[dict]) -> list[dict]:
+    """Merge technology detections by id.
+
+    Phase 1.5 (path probing) and Phase 4 (crawl-response analysis) both
+    write into `results["technologies"]`. Without this helper, a tech
+    with N matching paths produces N separate entries, which the summary
+    table renders as N duplicate rows. We merge on `id`, concatenate
+    `matched_on`, prefer the more specific `version`, and pick the
+    highest confidence seen across duplicates.
+    """
+    confidence_rank = {"high": 3, "medium": 2, "low": 1, "?": 0, None: 0, "": 0}
+    by_id: dict[str, dict] = {}
+    order: list[str] = []
+    for tech in techs:
+        tid = tech.get("id")
+        if not tid:
+            continue
+        if tid not in by_id:
+            merged = dict(tech)
+            merged["matched_on"] = list(tech.get("matched_on") or [])
+            by_id[tid] = merged
+            order.append(tid)
+            continue
+        existing = by_id[tid]
+        # Concatenate matched_on, deduping by (method, detail)
+        seen = {
+            (m.get("method"), m.get("detail"))
+            for m in existing["matched_on"]
+            if isinstance(m, dict)
+        }
+        for m in tech.get("matched_on") or []:
+            if not isinstance(m, dict):
+                continue
+            key = (m.get("method"), m.get("detail"))
+            if key not in seen:
+                existing["matched_on"].append(m)
+                seen.add(key)
+        # Prefer non-empty version
+        if not existing.get("version") and tech.get("version"):
+            existing["version"] = tech["version"]
+        # Promote confidence to the highest seen
+        new_conf = tech.get("confidence")
+        if confidence_rank.get(new_conf, 0) > confidence_rank.get(existing.get("confidence"), 0):
+            existing["confidence"] = new_conf
+    return [by_id[tid] for tid in order]
 
 
 class Fingerprinter:
@@ -124,10 +172,21 @@ class Fingerprinter:
         """
         Probe known technology-specific paths to detect technologies.
         e.g., /wp-login.php for WordPress.
+
+        Uses a 404-baseline to suppress false positives from catch-all
+        routers (SPA dev servers, Next.js fallback handlers) that return
+        HTTP 200 with the same body for every URL.
         """
         detections = []
         probed_paths = set()
+        baseline = await fetch_baseline(client, base_url)
+        if baseline.available:
+            print_status(
+                f"Fingerprint baseline: status={baseline.status_code}, "
+                f"len={baseline.body_length}"
+            )
 
+        baseline_drops = 0
         for tech_id, sig in self.signatures.items():
             paths = sig.get("paths", [])
             for path in paths:
@@ -144,6 +203,10 @@ class Fingerprinter:
                     )
 
                     if response.status_code == 200:
+                        body = response.text or ""
+                        if baseline.matches(response.status_code, body):
+                            baseline_drops += 1
+                            continue
                         detections.append({
                             "id": tech_id,
                             "name": sig.get("name", tech_id),
@@ -171,6 +234,9 @@ class Fingerprinter:
 
                 except Exception:
                     pass
+
+        if baseline_drops:
+            print_status(f"Dropped {baseline_drops} fingerprint probe(s) matching the 404 baseline")
 
         return detections
 
@@ -237,10 +303,20 @@ class Fingerprinter:
                             "detail": f"meta[{meta_name}]: {content[:100]}",
                         })
 
-        # Check body content
+        # Check body content. Use a word-boundary-style match so loose
+        # substrings like "wordpress" don't fire on minified bundles or
+        # comments that happen to contain those characters. Negative
+        # lookarounds work for patterns starting/ending with both word
+        # and non-word characters, unlike \b.
         if body:
             for body_pattern in sig.get("body", []):
-                if body_pattern.lower() in body.lower():
+                if not body_pattern:
+                    continue
+                body_re = re.compile(
+                    rf"(?<!\w){re.escape(body_pattern)}(?!\w)",
+                    re.IGNORECASE,
+                )
+                if body_re.search(body):
                     matched_on.append({
                         "method": "body",
                         "detail": f"Body contains: {body_pattern}",

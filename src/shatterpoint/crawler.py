@@ -19,7 +19,7 @@ import yaml
 
 from shatterpoint import __version__
 from shatterpoint.modules.extractor import Extractor
-from shatterpoint.modules.fingerprint import Fingerprinter
+from shatterpoint.modules.fingerprint import Fingerprinter, dedup_technologies
 from shatterpoint.modules.parser import HTMLParser
 from shatterpoint.modules.recon import ReconModule
 from shatterpoint.modules.spa import SPAAnalyzer
@@ -157,6 +157,7 @@ async def run_crawler(config: dict) -> dict:
         "emails": [],
         "parameters": [],
         "auth_mechanisms": [],
+        "security_headers": [],
         "robots_txt": {},
         "sitemap": {},
         "security_txt": {},
@@ -206,6 +207,9 @@ async def run_crawler(config: dict) -> dict:
             path_detections = await fingerprinter.probe_known_paths(recon_client, validator.base_url)
             if path_detections:
                 results["technologies"].extend(path_detections)
+            # Dedup after Phase 1.5 so the Phase 4 merge logic sees a
+            # clean per-id list (avoids 6× WordPress rows in the report).
+            results["technologies"] = dedup_technologies(results["technologies"])
 
         # ─── Phase 1.8: SPA Analysis ─────────────────────────────
         # Fetch landing HTML once (needed for both detection and bundle
@@ -276,6 +280,7 @@ async def run_crawler(config: dict) -> dict:
     all_api_endpoints = []
     all_comments = []
     all_auth = []
+    all_security_headers = []
     all_js_endpoints = []
 
     extract_cfg = config.get("extract", {})
@@ -314,11 +319,12 @@ async def run_crawler(config: dict) -> dict:
                 js_eps = extractor.extract_js_endpoints(inline_js, url)
                 all_js_endpoints.extend(js_eps)
 
-        # Detect auth mechanisms
+        # Detect auth mechanisms + security headers (separate taxonomies)
         if recon_cfg.get("auth_detection", True):
             page_forms = html_parser.extract_forms(body, url) if not extract_cfg.get("forms") else [f for f in all_forms if f["found_on"] == url]
             auth = recon.detect_auth_mechanisms(url, headers, body, page_forms)
             all_auth.extend(auth)
+            all_security_headers.extend(recon.detect_security_headers(url, headers))
 
         # Track interesting files
         if validator.is_interesting_file(url):
@@ -354,6 +360,20 @@ async def run_crawler(config: dict) -> dict:
             unique_auth.append(a)
     results["auth_mechanisms"] = unique_auth
 
+    # Deduplicate security headers — same header on same URL with same value
+    # is a single finding regardless of how many times we saw it. Collapse
+    # across URLs at presentation time but keep one entry per (header, value)
+    # to give the operator one snapshot rather than a per-URL flood.
+    seen_sh: set[tuple[str, str]] = set()
+    unique_security_headers = []
+    for sh in all_security_headers:
+        key = (sh.get("header", ""), sh.get("value", ""))
+        if key in seen_sh:
+            continue
+        seen_sh.add(key)
+        unique_security_headers.append(sh)
+    results["security_headers"] = unique_security_headers
+
     # File uploads
     results["file_uploads"] = [f for f in all_forms if f.get("has_file_upload")]
 
@@ -362,18 +382,11 @@ async def run_crawler(config: dict) -> dict:
         print_section("PHASE 4: Technology Fingerprinting")
         crawl_detections = fingerprinter.fingerprint_aggregate(crawl_results)
 
-        existing_ids = {t["id"] for t in results["technologies"]}
-        for det in crawl_detections:
-            if det["id"] not in existing_ids:
-                results["technologies"].append(det)
-            else:
-                for existing in results["technologies"]:
-                    if existing["id"] == det["id"]:
-                        existing["matched_on"].extend(det.get("matched_on", []))
-                        if det.get("version") and not existing.get("version"):
-                            existing["version"] = det["version"]
-                        existing["confidence"] = det.get("confidence", existing.get("confidence"))
-                        break
+        # Append all crawl detections and run one unified dedup pass —
+        # avoids the bug where Phase 4's inline merge silently dropped
+        # extra evidence when entries had been duplicated by Phase 1.5.
+        results["technologies"].extend(crawl_detections)
+        results["technologies"] = dedup_technologies(results["technologies"])
 
         for tech in results["technologies"]:
             print_finding(

@@ -225,35 +225,3 @@ class Spider:
                 return CrawlResult(url=url, error=str(e))
 
         return CrawlResult(url=url, error="too_many_redirects", redirect_chain=redirect_chain)
-
-    async def probe_url(self, client: httpx.AsyncClient, url: str) -> CrawlResult | None:
-        """Probe a single URL (used by recon modules to check known paths).
-
-        Uses follow_redirects=True so httpx handles redirects (and strips
-        Authorization on cross-origin hops per RFC 7235).
-        """
-        try:
-            start = time.monotonic()
-            response = await client.get(
-                url,
-                follow_redirects=True,
-                timeout=httpx.Timeout(self.timeout),
-                headers=self._auth_headers_for(url),
-            )
-            elapsed = time.monotonic() - start
-
-            content_type = response.headers.get("content-type", "")
-            body = ""
-            if "text/" in content_type or "json" in content_type or "xml" in content_type:
-                body = response.text
-
-            return CrawlResult(
-                url=url,
-                status_code=response.status_code,
-                headers=dict(response.headers),
-                body=body,
-                content_type=content_type,
-                response_time=elapsed,
-            )
-        except Exception:
-            return None
