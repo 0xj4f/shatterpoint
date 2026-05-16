@@ -45,12 +45,6 @@ recon:
   common_paths: true                  # Check for /admin, /login, etc.
   auth_detection: true                # Detect auth mechanisms (no attack)
 
-# Directory Enumeration (optional integration)
-direnum:
-  enabled: false                      # Set true to integrate feroxbuster results
-  feroxbuster_json: ""                # Path to feroxbuster JSON output
-  wordlist: ""                        # Custom wordlist path
-
 # SPA (Single Page Application) analysis
 # Framework detection runs every scan; bundle mining is opt-in via --spa
 # or 'enabled: true' below (or auto-triggers when 'auto_when_detected' is set).

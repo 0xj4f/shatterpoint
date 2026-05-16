@@ -241,6 +241,49 @@ my_custom_app:
 
 ---
 
+## Release process
+
+Versioning is **derived from git tags** at build time via [`hatch-vcs`](https://github.com/ofek/hatch-vcs). There is no version string committed in source code — the wheel and the published Docker image both report whatever the latest matching tag says.
+
+On every merge to `main`, the `release.yml` workflow:
+
+1. Reads `MAJOR_VERSION` and `MINOR_VERSION` from repo Variables.
+2. Finds the highest existing `v${MAJOR}.${MINOR}.*` tag and computes the next `PATCH`.
+3. Runs lint + tests as a sanity gate.
+4. Creates an annotated git tag `vMAJOR.MINOR.PATCH` (locally only at this point).
+5. Builds the wheel — `hatch-vcs` reads the local tag and stamps the wheel.
+6. Builds a multi-arch (`linux/amd64`, `linux/arm64`) Docker image.
+7. Pushes the image to Docker Hub with three tags: `MAJOR.MINOR.PATCH`, `MAJOR.MINOR`, `latest`.
+8. Only then pushes the git tag (so a failed Docker push doesn't leave a dangling tag).
+9. Creates a GitHub Release with auto-generated notes.
+
+To ship a new minor or major line, **bump the variable in the GitHub UI**. No code change required.
+
+### Required GitHub setup (one-time)
+
+| Where | What | Value |
+|---|---|---|
+| Settings → Secrets and variables → Actions → **Variables** | `MAJOR_VERSION` | `1` |
+| Settings → Secrets and variables → Actions → **Variables** | `MINOR_VERSION` | `0` |
+| Settings → Environments → new **Development** | (environment) | (creates the scope) |
+| Settings → Environments → Development → Secrets | `DOCKER_USER` | your Docker Hub username |
+| Settings → Environments → Development → Secrets | `DOCKER_PASSWORD` | a Docker Hub **access token** (not your password) |
+| Settings → Actions → General → Workflow permissions | "Read and write permissions" | (or rely on per-job `permissions: contents: write` in `release.yml` — which is already set) |
+
+Optional but recommended on the Development environment: require a reviewer to approve before the Docker push runs. Stops accidental publishes if a problematic PR sneaks into `main`.
+
+### Pull-request rules
+
+The `ci.yml` workflow blocks merges unless:
+
+- `ruff check src/ tests/` is clean.
+- `pytest tests/ -v` passes on Python 3.11, 3.12, 3.13.
+- `CHANGELOG.md` was modified in the PR (add a bullet under `[Unreleased]`).
+
+For PRs with no user-facing change (typos, internal refactors), add a line under `### Internal` rather than skipping the file.
+
+---
+
 ## License
 
 MIT

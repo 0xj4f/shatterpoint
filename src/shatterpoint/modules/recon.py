@@ -9,6 +9,7 @@ from xml.etree import ElementTree
 
 import httpx
 
+from shatterpoint.utils.baseline import fetch_baseline
 from shatterpoint.utils.formatter import print_finding, print_status
 
 
@@ -159,7 +160,12 @@ class ReconModule:
                     timeout=httpx.Timeout(10),
                 )
 
-                if response.status_code == 200 and ("xml" in response.headers.get("content-type", "") or response.text.strip().startswith("<?xml")):
+                content_type = response.headers.get("content-type", "")
+                looks_like_xml = (
+                    "xml" in content_type
+                    or response.text.strip().startswith("<?xml")
+                )
+                if response.status_code == 200 and looks_like_xml:
                     result["found"] = True
                     print_status(f"Sitemap found: {url}")
 
@@ -231,10 +237,22 @@ class ReconModule:
         return result
 
     async def probe_common_paths(self, client: httpx.AsyncClient) -> list[dict]:
-        """Probe common sensitive/interesting paths."""
+        """Probe common sensitive/interesting paths.
+
+        Captures a 404-baseline first; probes whose response matches the
+        baseline (catch-all SPA routers, custom soft-404 pages) are dropped
+        instead of being reported as 'found'.
+        """
         found = []
+        baseline = await fetch_baseline(client, self.base_url)
+        if baseline.available:
+            print_status(
+                f"404 baseline: status={baseline.status_code}, "
+                f"len={baseline.body_length} (catch-all responses will be filtered)"
+            )
         print_status(f"Probing {len(self.COMMON_PATHS)} common paths...")
 
+        baseline_drops = 0
         for path in self.COMMON_PATHS:
             url = f"{self.base_url}{path}"
             try:
@@ -245,8 +263,11 @@ class ReconModule:
                 )
 
                 if response.status_code == 200:
-                    # Check it's not a generic 404 page
-                    content_length = len(response.text)
+                    body = response.text or ""
+                    if baseline.matches(response.status_code, body):
+                        baseline_drops += 1
+                        continue
+                    content_length = len(body)
                     found.append({
                         "url": url,
                         "path": path,
@@ -278,13 +299,31 @@ class ReconModule:
             except Exception:
                 continue
 
+        if baseline_drops:
+            print_status(f"Dropped {baseline_drops} probe(s) matching the 404 baseline")
         print_status(f"Found {len(found)} accessible/interesting paths")
         return found
+
+    # Security headers reported as defensive posture — NOT authentication.
+    SECURITY_HEADERS = {
+        "content-security-policy": "Content Security Policy",
+        "strict-transport-security": "HSTS",
+        "x-content-type-options": "X-Content-Type-Options",
+        "x-xss-protection": "X-XSS-Protection",
+        "permissions-policy": "Permissions Policy",
+        "x-frame-options": "X-Frame-Options",
+        "referrer-policy": "Referrer Policy",
+        "cross-origin-opener-policy": "COOP",
+        "cross-origin-embedder-policy": "COEP",
+        "cross-origin-resource-policy": "CORP",
+    }
 
     def detect_auth_mechanisms(self, url: str, headers: dict, body: str, forms: list[dict]) -> list[dict]:
         """
         Detect authentication mechanisms from response data.
-        NO attacks - just identification.
+        NO attacks - just identification. Security headers are handled
+        separately in `detect_security_headers` — they are defensive
+        policy, not authentication.
         """
         auth = []
 
@@ -333,15 +372,7 @@ class ReconModule:
                     "has_csrf": form.get("has_csrf_token", False),
                 })
 
-        # Check for common auth-related headers
-        if headers.get("x-frame-options"):
-            auth.append({
-                "type": "Clickjacking Protection",
-                "url": url,
-                "detail": f"X-Frame-Options: {headers['x-frame-options']}",
-            })
-
-        # Check for session cookies
+        # Check for session cookies (these ARE auth-relevant)
         for key, value in headers.items():
             if key.lower() == "set-cookie":
                 cookie_lower = value.lower()
@@ -362,22 +393,23 @@ class ReconModule:
                         "detail": f"Cookie: {cookie_name} | Flags: {', '.join(flags) or 'NONE'}",
                     })
 
-        # Check security headers
-        security_headers = {
-            "content-security-policy": "Content Security Policy",
-            "strict-transport-security": "HSTS",
-            "x-content-type-options": "X-Content-Type-Options",
-            "x-xss-protection": "X-XSS-Protection",
-            "permissions-policy": "Permissions Policy",
-        }
+        return auth
 
-        for header, name in security_headers.items():
+    def detect_security_headers(self, url: str, headers: dict) -> list[dict]:
+        """Detect defensive HTTP security headers — separate from auth.
+
+        These describe the server's defensive posture (CSP, HSTS, XFO,
+        etc.) and don't tell you how users authenticate. Reporting them
+        in their own list keeps the auth_mechanisms section actionable.
+        """
+        findings = []
+        for header, name in self.SECURITY_HEADERS.items():
             value = headers.get(header)
             if value:
-                auth.append({
-                    "type": f"Security Header: {name}",
+                findings.append({
+                    "name": name,
+                    "header": header,
                     "url": url,
-                    "detail": value[:200],
+                    "value": value[:200],
                 })
-
-        return auth
+        return findings

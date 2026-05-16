@@ -5,7 +5,7 @@ import json
 import time
 
 from shatterpoint.modules.extractor import Extractor
-from shatterpoint.modules.fingerprint import Fingerprinter
+from shatterpoint.modules.fingerprint import Fingerprinter, dedup_technologies
 from shatterpoint.modules.parser import HTMLParser
 from shatterpoint.modules.recon import ReconModule
 from shatterpoint.modules.spa import (
@@ -26,6 +26,7 @@ from shatterpoint.utils.auth import (
     should_send_auth,
     warn_on_expiry,
 )
+from shatterpoint.utils.baseline import Baseline
 from shatterpoint.utils.validator import URLValidator
 
 
@@ -279,6 +280,245 @@ def test_should_send_auth_subdomain():
 def test_should_send_auth_empty_and_garbage():
     assert not should_send_auth("http", "example.com", "")
     assert not should_send_auth("http", "example.com", "not-a-url")
+
+
+# ─── Auth vs security-header taxonomy split ───────────────────────────
+
+
+def _make_recon():
+    # Minimal ReconModule for taxonomy tests — config defaults are fine
+    return ReconModule({}, "http://target.test")
+
+
+def test_auth_detection_returns_only_auth():
+    r = _make_recon()
+    headers = {
+        "www-authenticate": 'Basic realm="protected"',
+        "x-content-type-options": "nosniff",
+        "x-xss-protection": "1; mode=block",
+        "strict-transport-security": "max-age=31536000",
+    }
+    auth = r.detect_auth_mechanisms("http://target.test/admin", headers, "", [])
+    types = {a["type"] for a in auth}
+    # Auth mechanism is present:
+    assert "HTTP Basic Auth" in types
+    # Security headers must NOT leak into auth list:
+    assert not any("Security Header" in t for t in types)
+    assert not any("Content-Type-Options" in t for t in types)
+
+
+def test_auth_detection_picks_up_login_form():
+    r = _make_recon()
+    forms = [{
+        "found_on": "http://target.test/login",
+        "action": "/api/auth/login",
+        "method": "POST",
+        "has_password_field": True,
+        "has_csrf_token": True,
+    }]
+    auth = r.detect_auth_mechanisms("http://target.test/login", {}, "", forms)
+    assert any(a["type"] == "Login Form" for a in auth)
+
+
+def test_security_headers_returns_only_security_headers():
+    r = _make_recon()
+    headers = {
+        "content-security-policy": "default-src 'self'",
+        "strict-transport-security": "max-age=63072000",
+        "x-content-type-options": "nosniff",
+        "x-frame-options": "DENY",
+        "x-xss-protection": "1; mode=block",
+        # Non-security header — must be ignored
+        "server": "nginx/1.25.3",
+        "www-authenticate": "Bearer",
+    }
+    sh = r.detect_security_headers("http://target.test/", headers)
+    names = {h["name"] for h in sh}
+    assert "Content Security Policy" in names
+    assert "HSTS" in names
+    assert "X-Content-Type-Options" in names
+    assert "X-Frame-Options" in names
+    assert "X-XSS-Protection" in names
+    # Auth header didn't leak in
+    assert not any("auth" in n.lower() for n in names)
+
+
+def test_security_headers_empty_when_none_present():
+    r = _make_recon()
+    assert r.detect_security_headers("http://target.test/", {"server": "x"}) == []
+
+
+# ─── Fingerprint body matching tests ──────────────────────────────────
+
+
+def test_fingerprint_body_word_boundary_matches_standalone():
+    fp = Fingerprinter({
+        "fingerprint": {
+            "check_headers": True,
+            "check_cookies": True,
+            "check_meta": True,
+            "check_scripts": True,
+        }
+    })
+    # Standalone "react" token in body → should fire React detection
+    detections = fp.fingerprint_from_response(
+        "http://test.com",
+        {},
+        '<html><body><script>var react = require("react");</script></body></html>',
+    )
+    names = {d["name"] for d in detections}
+    assert "React" in names
+
+
+def test_fingerprint_body_word_boundary_rejects_substring():
+    fp = Fingerprinter({
+        "fingerprint": {
+            "check_headers": True,
+            "check_cookies": True,
+            "check_meta": True,
+            "check_scripts": True,
+        }
+    })
+    # Substring-only case in isolation:
+    detections2 = fp.fingerprint_from_response(
+        "http://test.com",
+        {},
+        "<html><body>wordpresslike framework, very wordpressy.</body></html>",
+    )
+    names2 = {d["name"] for d in detections2}
+    assert "WordPress" not in names2, (
+        "word-boundary matcher leaked: 'wordpresslike' should not match 'wordpress'"
+    )
+
+
+def test_fingerprint_body_word_boundary_hyphenated_pattern():
+    fp = Fingerprinter({
+        "fingerprint": {
+            "check_headers": True,
+            "check_cookies": True,
+            "check_meta": True,
+            "check_scripts": True,
+        }
+    })
+    # ng-version is a hyphenated pattern; must still match in Angular markup
+    detections = fp.fingerprint_from_response(
+        "http://test.com",
+        {},
+        '<html><body><app-root ng-version="14.2.0"></app-root></body></html>',
+    )
+    names = {d["name"] for d in detections}
+    assert "Angular" in names
+
+
+# ─── Technology dedup tests ───────────────────────────────────────────
+
+
+def test_dedup_technologies_merges_by_id():
+    def _m(method, detail):
+        return [{"method": method, "detail": detail}]
+
+    techs = [
+        {"id": "wordpress", "name": "WordPress", "matched_on": _m("path_probe", "/wp-login.php returned 200")},
+        {"id": "wordpress", "name": "WordPress", "matched_on": _m("path_probe", "/wp-admin/ returned 200")},
+        {"id": "wordpress", "name": "WordPress", "matched_on": _m("header", "x-powered-by: WordPress")},
+    ]
+    deduped = dedup_technologies(techs)
+    assert len(deduped) == 1
+    assert deduped[0]["id"] == "wordpress"
+    assert len(deduped[0]["matched_on"]) == 3
+
+
+def test_dedup_technologies_preserves_distinct_ids():
+    techs = [
+        {"id": "wordpress", "name": "WordPress", "matched_on": []},
+        {"id": "drupal", "name": "Drupal", "matched_on": []},
+        {"id": "wordpress", "name": "WordPress", "matched_on": []},
+    ]
+    deduped = dedup_technologies(techs)
+    assert {t["id"] for t in deduped} == {"wordpress", "drupal"}
+    assert len(deduped) == 2
+
+
+def test_dedup_technologies_keeps_non_empty_version():
+    techs = [
+        {"id": "nginx", "name": "Nginx", "version": None, "matched_on": []},
+        {"id": "nginx", "name": "Nginx", "version": "1.25.3", "matched_on": []},
+    ]
+    deduped = dedup_technologies(techs)
+    assert deduped[0]["version"] == "1.25.3"
+
+
+def test_dedup_technologies_picks_highest_confidence():
+    techs = [
+        {"id": "react", "name": "React", "confidence": "low", "matched_on": []},
+        {"id": "react", "name": "React", "confidence": "high", "matched_on": []},
+        {"id": "react", "name": "React", "confidence": "medium", "matched_on": []},
+    ]
+    deduped = dedup_technologies(techs)
+    assert deduped[0]["confidence"] == "high"
+
+
+def test_dedup_technologies_dedups_matched_on_entries():
+    # Same evidence reported twice should collapse to one entry
+    techs = [
+        {"id": "x", "name": "X", "matched_on": [{"method": "header", "detail": "server: X"}]},
+        {"id": "x", "name": "X", "matched_on": [{"method": "header", "detail": "server: X"}]},
+    ]
+    deduped = dedup_technologies(techs)
+    assert len(deduped[0]["matched_on"]) == 1
+
+
+def test_dedup_technologies_empty():
+    assert dedup_technologies([]) == []
+
+
+# ─── Baseline helper tests ────────────────────────────────────────────
+
+
+def _make_baseline(body: str, status: int = 200) -> Baseline:
+    import hashlib
+    return Baseline(
+        available=True,
+        status_code=status,
+        body_hash=hashlib.sha256(body.encode("utf-8")).hexdigest(),
+        body_length=len(body),
+    )
+
+
+def test_baseline_unavailable_never_matches():
+    b = Baseline(available=False, status_code=0, body_hash="", body_length=0)
+    assert b.matches(200, "anything") is False
+    assert b.matches(404, "") is False
+
+
+def test_baseline_matches_identical_body():
+    b = _make_baseline("<html><body>Not found</body></html>")
+    assert b.matches(200, "<html><body>Not found</body></html>") is True
+
+
+def test_baseline_rejects_different_body():
+    b = _make_baseline("<html><body>Not found</body></html>")
+    assert b.matches(200, "<html><body>WordPress admin login</body></html>") is False
+
+
+def test_baseline_matches_near_identical_length():
+    # SPA catch-all that includes a CSRF token: same shape, tiny variation
+    base = "x" * 1000
+    b = _make_baseline(base)
+    candidate = "x" * 1010  # 1% longer — within 5% tolerance
+    assert b.matches(200, candidate) is True
+
+
+def test_baseline_rejects_different_status_when_length_close():
+    b = _make_baseline("payload", status=200)
+    assert b.matches(401, "payload") is True   # same body wins regardless
+    assert b.matches(401, "different") is False  # different body + different status
+
+
+def test_baseline_empty_body_matches_when_baseline_empty():
+    b = Baseline(available=True, status_code=200, body_hash="", body_length=0)
+    assert b.matches(200, "") is True
+    assert b.matches(200, "real content") is False
 
 
 # ─── SPA analyzer tests ───────────────────────────────────────────────

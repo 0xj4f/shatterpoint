@@ -1,44 +1,36 @@
-# ── Build stage ──────────────────────────────────────────
-FROM python:3.12-slim AS builder
+# shatterpoint Dockerfile
+#
+# CI builds the wheel on the runner (so hatch-vcs can read the git tag
+# and stamp the version) and this image just installs it. Single stage,
+# minimal layers, multi-arch friendly (the wheel is `py3-none-any`).
+#
+# Build context expectation:
+#   - ./dist/shatterpoint-<version>-py3-none-any.whl exists
+#
+# To build locally:
+#   python -m build --wheel
+#   docker build -t shatterpoint:dev .
 
-WORKDIR /app
-
-# Install build deps first (layer cache)
-COPY pyproject.toml README.md ./
-COPY src/ src/
-
-RUN pip install --no-cache-dir build \
-    && python -m build --wheel --outdir /app/dist
-
-# ── Runtime stage ────────────────────────────────────────
 FROM python:3.12-slim AS runtime
 
-LABEL maintainer="0xj4f"
-LABEL description="shatterpoint — OSCP Recon Attack Surface Mapper"
+LABEL org.opencontainers.image.title="shatterpoint"
+LABEL org.opencontainers.image.description="OSCP Recon Attack Surface Mapper"
+LABEL org.opencontainers.image.authors="0xj4f"
+LABEL org.opencontainers.image.source="https://github.com/0xj4f/shatterpoint"
+LABEL org.opencontainers.image.licenses="MIT"
 
 WORKDIR /app
 
-# Install the built wheel + runtime deps only
-COPY --from=builder /app/dist/*.whl /tmp/
+# Install the pre-built wheel produced by the CI runner. Using
+# --no-cache-dir keeps the layer small; the wheel itself is removed
+# after install to drop another ~1MB.
+COPY dist/*.whl /tmp/
 RUN pip install --no-cache-dir /tmp/*.whl \
     && rm -rf /tmp/*.whl
 
-# Default output directory
+# Reports are written here by default.
 RUN mkdir -p /app/output
 VOLUME ["/app/output"]
 
 ENTRYPOINT ["shatterpoint"]
 CMD ["--help"]
-
-# ── Test stage (used by CI only) ─────────────────────────
-FROM python:3.12-slim AS test
-
-WORKDIR /app
-
-COPY pyproject.toml README.md ./
-COPY src/ src/
-COPY tests/ tests/
-
-RUN pip install --no-cache-dir ".[dev]"
-
-CMD ["pytest", "tests/", "-v"]

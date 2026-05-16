@@ -1,0 +1,176 @@
+name: Release
+
+# Tag, build, and publish to Docker Hub on every merge to main.
+#
+# Versioning model:
+#   - GitHub Variables MAJOR_VERSION and MINOR_VERSION control the
+#     major/minor portion. Bump them via the GitHub UI when you want
+#     to ship a new minor/major line.
+#   - PATCH auto-increments. Computed as (highest existing
+#     v${MAJOR}.${MINOR}.* tag's PATCH) + 1, or 0 if none exists.
+#
+# Required GitHub setup (one-time, manual):
+#   - Repo Variables: MAJOR_VERSION, MINOR_VERSION (e.g. 0, 1)
+#   - Environment "Development" with secrets:
+#       DOCKER_USER, DOCKER_PASSWORD
+#   - Workflow permissions: contents:write (set below at job level)
+
+on:
+  push:
+    branches: [main]
+
+# Avoid concurrent release runs racing on the same tag.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Tag & publish
+    runs-on: ubuntu-latest
+    # GitHub Environment scopes DOCKER_USER / DOCKER_PASSWORD. Add a
+    # reviewer requirement in the Environment settings if you want a
+    # manual approval gate before each Docker push.
+    environment: Development
+    permissions:
+      # Required to create and push the git tag back to the repo.
+      contents: write
+    steps:
+      - name: Checkout (full history + tags)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Validate version variables
+        run: |
+          if [ -z "${{ vars.MAJOR_VERSION }}" ] || [ -z "${{ vars.MINOR_VERSION }}" ]; then
+            echo "::error::MAJOR_VERSION and MINOR_VERSION repo variables must be set"
+            echo "::error::Go to Settings → Secrets and variables → Actions → Variables"
+            exit 1
+          fi
+
+      - name: Compute next version
+        id: version
+        run: |
+          MAJOR="${{ vars.MAJOR_VERSION }}"
+          MINOR="${{ vars.MINOR_VERSION }}"
+
+          # Find the highest existing PATCH for this MAJOR.MINOR line.
+          # `sort -V` does proper semver-ish sorting.
+          LAST_TAG=$(git tag -l "v${MAJOR}.${MINOR}.*" | sort -V | tail -n1)
+
+          if [ -z "$LAST_TAG" ]; then
+            NEXT_PATCH=0
+            echo "No prior v${MAJOR}.${MINOR}.* tag — starting at patch 0"
+          else
+            CURRENT_PATCH=$(echo "$LAST_TAG" | sed -E "s/^v${MAJOR}\.${MINOR}\.//")
+            NEXT_PATCH=$((CURRENT_PATCH + 1))
+            echo "Previous tag: $LAST_TAG → next patch: $NEXT_PATCH"
+          fi
+
+          VERSION="${MAJOR}.${MINOR}.${NEXT_PATCH}"
+          TAG="v${VERSION}"
+          MAJOR_MINOR="${MAJOR}.${MINOR}"
+
+          echo "version=${VERSION}"        | tee -a "$GITHUB_OUTPUT"
+          echo "tag=${TAG}"                | tee -a "$GITHUB_OUTPUT"
+          echo "major_minor=${MAJOR_MINOR}"| tee -a "$GITHUB_OUTPUT"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install package + dev deps
+        run: pip install ".[dev]" build
+
+      - name: Run lint + tests (sanity gate)
+        run: |
+          ruff check src/ tests/
+          pytest tests/ -v
+
+      # ── Tag locally BEFORE building so hatch-vcs resolves to the new
+      #    version. The tag is only pushed after the Docker push succeeds,
+      #    so a failed run doesn't leave a dangling tag.
+      - name: Create local annotated tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${{ steps.version.outputs.tag }}" \
+            -m "Release ${{ steps.version.outputs.tag }}"
+
+      - name: Build wheel (hatch-vcs picks up the tag)
+        run: |
+          rm -rf dist/
+          python -m build --wheel
+          ls -lh dist/
+
+      - name: Verify wheel reports the right version
+        run: |
+          python -m venv /tmp/verify
+          /tmp/verify/bin/pip install --quiet dist/*.whl
+          INSTALLED=$(/tmp/verify/bin/shatterpoint --version | awk '{print $2}')
+          EXPECTED="${{ steps.version.outputs.version }}"
+          if [ "$INSTALLED" != "$EXPECTED" ]; then
+            echo "::error::Version mismatch — wheel reports '$INSTALLED', expected '$EXPECTED'"
+            exit 1
+          fi
+          echo "✓ wheel reports $INSTALLED"
+
+      - name: Set up QEMU (for multi-arch Docker builds)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USER }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build + push multi-arch image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          target: runtime
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            0xj4f/shatterpoint:${{ steps.version.outputs.version }}
+            0xj4f/shatterpoint:${{ steps.version.outputs.major_minor }}
+            0xj4f/shatterpoint:latest
+          # OCI labels surface version + commit on Docker Hub UI.
+          labels: |
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          # Cache buildx layers between runs for speed.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Only push the tag after Docker has succeeded. If anything above
+      # this step failed, the tag stays local-only (dies with the runner)
+      # and a re-run will compute the same tag fresh.
+      - name: Push git tag
+        run: git push origin "${{ steps.version.outputs.tag }}"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: ${{ steps.version.outputs.tag }}
+          generate_release_notes: true
+          body: |
+            ## shatterpoint ${{ steps.version.outputs.tag }}
+
+            Docker image:
+            ```
+            docker pull 0xj4f/shatterpoint:${{ steps.version.outputs.version }}
+            docker pull 0xj4f/shatterpoint:${{ steps.version.outputs.major_minor }}
+            docker pull 0xj4f/shatterpoint:latest
+            ```
+
+            See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/${{ steps.version.outputs.tag }}/CHANGELOG.md) for details.

@@ -10,8 +10,10 @@ secrets. No browser, no JS execution — pure regex + JSON parsing.
 The module is orchestration over existing helpers:
   - HTMLParser.extract_scripts for bundle enumeration
   - Extractor.extract_js_endpoints for API endpoint mining
-  - Spider.probe_url for all HTTP fetches (inherits auth + timeout)
   - URLValidator.is_in_scope for scope discipline
+  - httpx.AsyncClient directly for bundle/source-map fetching (the
+    shared recon client has the bearer-token Authorization header set,
+    and httpx strips it automatically on cross-origin redirects)
 """
 
 from __future__ import annotations
@@ -406,10 +408,11 @@ class SPAAnalyzer:
     async def _fetch_text(self, client: httpx.AsyncClient, url: str) -> tuple[str | None, str | None]:
         """Fetch a URL as text, regardless of content-type.
 
-        Bypasses Spider.probe_url because its body filter drops
-        `application/javascript` responses, which are exactly what we need.
-        The caller's client carries the bearer-token Authorization header,
-        and httpx strips it automatically on cross-origin redirects.
+        We deliberately don't filter by content-type — JS bundles arrive
+        as `application/javascript` and source maps as `application/json`,
+        both of which a naive text/* filter would drop. The caller's
+        client carries the bearer-token Authorization header, and httpx
+        strips it automatically on cross-origin redirects.
         """
         try:
             response = await client.get(
