@@ -247,7 +247,7 @@ Versioning is **derived from git tags** at build time via [`hatch-vcs`](https://
 
 On every merge to `main`, the `release.yml` workflow:
 
-1. Reads `MAJOR_VERSION` and `MINOR_VERSION` from repo Variables.
+1. Reads `MAJOR_VERSION` and `MINOR_VERSION` from the `env:` block hardcoded in `release.yml`.
 2. Finds the highest existing `v${MAJOR}.${MINOR}.*` tag and computes the next `PATCH`.
 3. Runs lint + tests as a sanity gate.
 4. Creates an annotated git tag `vMAJOR.MINOR.PATCH` (locally only at this point).
@@ -257,18 +257,18 @@ On every merge to `main`, the `release.yml` workflow:
 8. Only then pushes the git tag (so a failed Docker push doesn't leave a dangling tag).
 9. Creates a GitHub Release with auto-generated notes.
 
-To ship a new minor or major line, **bump the variable in the GitHub UI**. No code change required.
+To ship a new minor or major line, **bump `MAJOR_VERSION` / `MINOR_VERSION` in the `env:` block of `release.yml`** and merge. The version lives in the codebase and is reviewed via PR — no GitHub UI clicks, nothing hidden in repo settings.
 
 ### Required GitHub setup (one-time)
 
 | Where | What | Value |
 |---|---|---|
-| Settings → Secrets and variables → Actions → **Variables** | `MAJOR_VERSION` | `1` |
-| Settings → Secrets and variables → Actions → **Variables** | `MINOR_VERSION` | `0` |
 | Settings → Environments → new **Development** | (environment) | (creates the scope) |
 | Settings → Environments → Development → Secrets | `DOCKER_USER` | your Docker Hub username |
 | Settings → Environments → Development → Secrets | `DOCKER_PASSWORD` | a Docker Hub **access token** (not your password) |
 | Settings → Actions → General → Workflow permissions | "Read and write permissions" | (or rely on per-job `permissions: contents: write` in `release.yml` — which is already set) |
+
+Version (`MAJOR_VERSION` / `MINOR_VERSION`) is **no longer a GitHub Variable** — it's hardcoded in `release.yml`. Only the Docker Hub secrets need configuring.
 
 Optional but recommended on the Development environment: require a reviewer to approve before the Docker push runs. Stops accidental publishes if a problematic PR sneaks into `main`.
 

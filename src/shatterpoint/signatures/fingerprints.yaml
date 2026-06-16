@@ -38,12 +38,15 @@ drupal:
       pattern: "(?i)drupal"
     - header: "x-drupal-cache"
       pattern: ".*"
+  # Drupal-specific paths only. /user/login and /admin/content were
+  # removed — they're not Drupal-unique (Django's admin redirects
+  # /admin/content → 302, producing a Drupal false-positive on Django
+  # targets). The remaining paths exist only in a real Drupal install.
   paths:
     - "/core/misc/drupal.js"
     - "/sites/default/"
     - "/core/CHANGELOG.txt"
-    - "/user/login"
-    - "/admin/content"
+    - "/core/install.php"
   meta:
     - name: "generator"
       pattern: "(?i)drupal\\s*([\\d.]+)?"
@@ -128,6 +131,23 @@ tomcat:
     - "/WEB-INF/"
   body:
     - "Apache Tomcat"
+
+springboot:
+  name: "Spring Boot"
+  category: "Framework"
+  # X-Application-Context is a Spring-Boot-specific header (older 1.x/2.x).
+  # The Whitelabel Error Page + org.springframework body markers are
+  # distinctive. /actuator/health returning {"status":"UP"} is the classic
+  # Spring Boot tell. Each signal is Spring-specific (no bare PHP/server
+  # banners that would false-positive on unrelated apps).
+  headers:
+    - header: "x-application-context"
+      pattern: "."
+  body:
+    - "Whitelabel Error Page"
+    - "org.springframework"
+  paths:
+    - "/actuator/health"
 
 flask:
   name: "Flask"

@@ -57,6 +57,35 @@ _LARAVEL_NAMESPACES = [
 _LARAVEL_VERSION = re.compile(r'/vendor/laravel/framework/v?(\d+\.\d+(?:\.\d+)?)')
 _PHP_VERSION = re.compile(r'PHP[/ ]v?(\d+\.\d+\.\d+)')
 
+# ─── Other framework debug-page markers (precise, not generic) ────────
+#
+# These attribute a leaked error page to a framework. Markers are chosen
+# to be framework-distinctive: a bare "DEBUG = True" would false-positive
+# on random JS, so Django uses the exact technical-500 template phrasing
+# and the django.* module namespace that only appears in real tracebacks.
+
+_DJANGO_MARKERS = [
+    re.compile(r'DEBUG = True</code>', re.IGNORECASE),         # exact technical_500 template text
+    re.compile(r'Django Version', re.IGNORECASE),              # debug-page header row
+    re.compile(r'\bdjango\.(?:core|db|http|urls|template|contrib|middleware)\.'),  # traceback module paths
+    re.compile(r'DisallowedHost', re.IGNORECASE),
+]
+_DJANGO_VERSION = re.compile(r'Django Version[^0-9]{0,40}(\d+\.\d+(?:\.\d+)?)', re.IGNORECASE | re.DOTALL)
+
+_FLASK_MARKERS = [
+    re.compile(r'Werkzeug Debugger', re.IGNORECASE),
+    re.compile(r'__debugger__'),
+    re.compile(r'werkzeug\.debug', re.IGNORECASE),
+    re.compile(r'\bWerkzeug/\d', re.IGNORECASE),
+]
+_WERKZEUG_VERSION = re.compile(r'Werkzeug/(\d+\.\d+(?:\.\d+)?)', re.IGNORECASE)
+
+_SPRING_MARKERS = [
+    re.compile(r'Whitelabel Error Page', re.IGNORECASE),
+    re.compile(r'\bat org\.springframework\.'),
+    re.compile(r'\borg\.springframework\.\w'),
+]
+
 # ─── Ignition (Laravel debug handler) ─────────────────────────────────
 
 _IGNITION_MARKERS = [
@@ -147,14 +176,26 @@ def has_stack_trace(body: str) -> bool:
 def detect_framework(body: str) -> tuple[str | None, str | None]:
     """Return (framework_name, framework_version) inferred from the body.
 
-    v1 only recognises Laravel (via Illuminate / Symfony HttpKernel /
-    vendor path markers). Returns (None, None) if no framework signal.
+    Recognises Laravel (Illuminate / Symfony HttpKernel / vendor path),
+    Django (technical-500 page / django.* traceback modules), Flask
+    (Werkzeug debugger), and Spring Boot (Whitelabel / org.springframework
+    stack frames). Returns the display name + version (when extractable),
+    or (None, None) if no framework signal. Laravel is checked first as
+    its markers are the most specific.
     """
     if not body:
         return None, None
     if any(p.search(body) for p in _LARAVEL_NAMESPACES):
         version_match = _LARAVEL_VERSION.search(body)
         return "Laravel", (version_match.group(1) if version_match else None)
+    if any(p.search(body) for p in _DJANGO_MARKERS):
+        version_match = _DJANGO_VERSION.search(body)
+        return "Django", (version_match.group(1) if version_match else None)
+    if any(p.search(body) for p in _FLASK_MARKERS):
+        version_match = _WERKZEUG_VERSION.search(body)
+        return "Flask", (version_match.group(1) if version_match else None)
+    if any(p.search(body) for p in _SPRING_MARKERS):
+        return "Spring Boot", None
     return None, None
 
 

@@ -761,6 +761,264 @@ def test_bootstrap_still_fires_on_real_bootstrap_site():
     assert "Bootstrap" in names
 
 
+# ─── Framework CVE signal-recon (precision guards) ────────────────────
+
+
+def _run_probe_sync(probe, status, body, headers=None):
+    """Drive FrameworkRecon._run_probe against a mocked response."""
+    import asyncio
+
+    import httpx
+
+    from shatterpoint.modules.framework_recon import FrameworkRecon
+    from shatterpoint.utils.baseline import Baseline
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, text=body, headers=headers or {})
+
+    async def go():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            fr = FrameworkRecon({"framework_recon": {"enabled": True}}, URLValidator("http://t.test"))
+            # available=False → baseline never matches, so we isolate the
+            # confirm_any / escalation logic under test.
+            baseline = Baseline(available=False, status_code=0, body_hash="", body_length=0)
+            return await fr._run_probe(client, "http://t.test", probe, baseline)
+
+    return asyncio.run(go())
+
+
+def test_framework_probes_are_passive_get_only():
+    """Passivity guard: the Probe dataclass must not carry any field that
+    could turn a probe into an exploit (HTTP method override, request
+    body, payload). This is the machine-enforced 'we don't exploit'."""
+    import dataclasses
+
+    from shatterpoint.modules.framework_recon import Probe
+
+    fields = {f.name for f in dataclasses.fields(Probe)}
+    forbidden = {"method", "data", "payload", "json", "body", "headers", "params"}
+    leaked = fields & forbidden
+    assert not leaked, f"Probe must stay GET-only signal-checks; forbidden fields present: {leaked}"
+
+
+def test_framework_probes_use_only_get_at_runtime():
+    """Runtime passivity guard: running every profile against a mock
+    server must issue GET requests only — never POST/PUT/etc."""
+    import asyncio
+
+    import httpx
+
+    from shatterpoint.modules.framework_recon import _PROFILES, FrameworkRecon
+
+    methods_seen = set()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        methods_seen.add(request.method)
+        return httpx.Response(404, text="not found")
+
+    async def go():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            fr = FrameworkRecon({"framework_recon": {"enabled": True}}, URLValidator("http://t.test"))
+            techs = [{"id": fid} for fid in _PROFILES]
+            await fr.analyze(client, "http://t.test", techs)
+
+    asyncio.run(go())
+    assert methods_seen == {"GET"}, f"framework recon must be GET-only, saw: {methods_seen}"
+
+
+def test_framework_probe_cve_format():
+    """Every CVE reference across all profiles must be a well-formed CVE ID."""
+    import re
+
+    from shatterpoint.modules.framework_recon import _PROFILES
+
+    cve_re = re.compile(r"^CVE-\d{4}-\d{4,}$")
+    for fid, probes in _PROFILES.items():
+        for probe in probes:
+            for cve in (probe.cve, probe.escalate_cve):
+                if cve is not None:
+                    assert cve_re.match(cve), f"{fid} probe {probe.path} has malformed CVE: {cve}"
+
+
+def test_confirm_any_gate_drops_200_without_marker():
+    """Precision: a 200 lacking every confirm_any marker is NOT the
+    framework resource and must be dropped (no false positive)."""
+    from shatterpoint.modules.framework_recon import Probe
+
+    probe = Probe("/console", "critical", "Werkzeug debugger",
+                  cve="CVE-2024-34069", confirm_any=("werkzeug", "__debugger__"))
+    # Generic 200 with no Werkzeug marker → dropped
+    assert _run_probe_sync(probe, 200, "<html>generic app page</html>") is None
+
+
+def test_confirm_any_gate_keeps_200_with_marker():
+    from shatterpoint.modules.framework_recon import Probe
+
+    probe = Probe("/console", "critical", "Werkzeug debugger",
+                  cve="CVE-2024-34069", confirm_any=("werkzeug", "__debugger__"))
+    result = _run_probe_sync(probe, 200, "<title>Werkzeug Debugger</title>")
+    assert result is not None
+    assert result.status_code == 200
+    assert result.cve == "CVE-2024-34069"
+
+
+def test_confirm_any_bypassed_on_non_200_signal_code():
+    """A 403/401 means the route exists but is protected — that's still a
+    signal, so the content gate is bypassed for non-200 codes."""
+    from shatterpoint.modules.framework_recon import Probe
+
+    probe = Probe("/console", "critical", "Werkzeug debugger",
+                  confirm_any=("werkzeug",))
+    result = _run_probe_sync(probe, 403, "")
+    assert result is not None
+    assert result.status_code == 403
+
+
+def test_env_escalates_to_cve_when_app_key_present():
+    """The .env probe escalates to CVE-2018-15133 only when APP_KEY is in
+    the body — a reachable .env without it stays a plain critical."""
+    from shatterpoint.modules.framework_recon import Probe
+
+    env_probe = Probe(
+        "/.env", "critical", "Laravel env file",
+        escalate_any=("app_key=base64:", "app_key="),
+        escalate_cve="CVE-2018-15133", escalate_note="env with APP_KEY",
+    )
+    # With APP_KEY → escalated
+    leaked = _run_probe_sync(env_probe, 200, "APP_NAME=demo\nAPP_KEY=base64:abc123==\nDB_PASS=x")
+    assert leaked is not None
+    assert leaked.cve == "CVE-2018-15133"
+    assert leaked.note == "env with APP_KEY"
+    # Without APP_KEY → base finding, no CVE
+    plain = _run_probe_sync(env_probe, 200, "APP_NAME=demo\nDB_HOST=localhost")
+    assert plain is not None
+    assert plain.cve is None
+
+
+def test_springboot_profile_covers_critical_endpoints():
+    from shatterpoint.modules.framework_recon import _PROFILES
+
+    paths = {p.path for p in _PROFILES["springboot"]}
+    for must in ("/actuator/heapdump", "/actuator/gateway/routes", "/actuator/env"):
+        assert must in paths, f"Spring Boot profile missing {must}"
+    # Gateway routes must carry the SpEL RCE CVE
+    gw = next(p for p in _PROFILES["springboot"] if p.path == "/actuator/gateway/routes")
+    assert gw.cve == "CVE-2022-22947"
+
+
+def test_framework_recon_springboot_actuator_end_to_end():
+    """Integration (substitutes for the heavy Spring Boot lab): drive the
+    full analyze() flow against a simulated actuator target and assert the
+    high-value findings + CVE mapping fire, gated by content confirmation."""
+    import asyncio
+
+    import httpx
+
+    from shatterpoint.modules.framework_recon import FrameworkRecon
+
+    responses = {
+        "/actuator": (200, '{"_links":{"self":{"href":"http://t/actuator"}}}'),
+        "/actuator/heapdump": (200, "JAVA PROFILE 1.0.2\x00binaryheapdumpdata"),
+        "/actuator/gateway/routes": (200, '[{"route_id":"r1","predicate":"Paths","uri":"lb://svc","filters":[]}]'),
+        "/actuator/env": (200, '{"activeProfiles":["prod"],"propertySources":[{"name":"systemProperties"}]}'),
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        s_b = responses.get(request.url.path)
+        if s_b:
+            return httpx.Response(s_b[0], text=s_b[1])
+        return httpx.Response(404, text="<html>Whitelabel Error Page</html>")
+
+    async def go():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            fr = FrameworkRecon({"framework_recon": {"enabled": True}}, URLValidator("http://t.test"))
+            return await fr.analyze(client, "http://t.test", [{"id": "springboot"}])
+
+    result = asyncio.run(go())
+    by_path = {p["path"]: p for p in result["probes"]}
+    assert "/actuator/gateway/routes" in by_path
+    assert by_path["/actuator/gateway/routes"]["cve"] == "CVE-2022-22947"
+    assert by_path["/actuator/gateway/routes"]["severity"] == "critical"
+    assert "/actuator/heapdump" in by_path           # JAVA PROFILE magic confirmed
+    assert "/actuator/env" in by_path                # propertySources confirmed
+    assert result["manual_pointers"].get("springboot")  # Spring4Shell/Log4Shell guidance
+
+
+def test_framework_recon_springboot_no_false_positive_on_catchall():
+    """Precision: a catch-all server that 200s everything with the SAME
+    body must NOT produce actuator findings (baseline + confirm_any)."""
+    import asyncio
+
+    import httpx
+
+    from shatterpoint.modules.framework_recon import FrameworkRecon
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        # Every path returns an identical generic SPA shell
+        return httpx.Response(200, text="<html><body><div id=root></div></body></html>")
+
+    async def go():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            fr = FrameworkRecon({"framework_recon": {"enabled": True}}, URLValidator("http://t.test"))
+            return await fr.analyze(client, "http://t.test", [{"id": "springboot"}])
+
+    result = asyncio.run(go())
+    # No actuator JSON markers present anywhere → zero probe findings
+    assert result["probes"] == [], f"catch-all should yield no findings, got {result['probes']}"
+
+
+def test_manual_pointers_present_for_each_framework():
+    """The non-recon-detectable CVEs (Spring4Shell, Log4Shell, SSTI, etc.)
+    must be surfaced as manual-test guidance, not silently dropped."""
+    from shatterpoint.modules.framework_recon import _MANUAL_POINTERS, _PROFILES
+
+    for fid in _PROFILES:
+        assert fid in _MANUAL_POINTERS, f"{fid} has no manual-test pointers"
+    # Spring4Shell + Log4Shell must be named (they're famous, exam-relevant)
+    spring_text = " ".join(_MANUAL_POINTERS["springboot"])
+    assert "CVE-2022-22965" in spring_text  # Spring4Shell
+    assert "CVE-2021-44228" in spring_text  # Log4Shell
+
+
+# ─── Multi-framework debug detection (stacktrace) ─────────────────────
+
+
+def test_stacktrace_detects_django_debug_page():
+    body = (
+        "<h1>ValueError at /boom/</h1>"
+        "<table><tr><th>Django Version:</th><td>4.2.11</td></tr></table>"
+        "<p>You're seeing this error because you have <code>DEBUG = True</code></p>"
+        "Traceback (most recent call last): django.core.handlers.exception"
+    )
+    fw, version = st_detect_framework(body)
+    assert fw == "Django"
+    assert version == "4.2.11"
+
+
+def test_stacktrace_detects_flask_werkzeug_debugger():
+    body = '<title>Werkzeug Debugger</title><script src="?__debugger__=yes">Werkzeug/3.0.1</script>'
+    fw, version = st_detect_framework(body)
+    assert fw == "Flask"
+    assert version == "3.0.1"
+
+
+def test_stacktrace_detects_springboot_whitelabel():
+    body = (
+        "<h1>Whitelabel Error Page</h1><p>There was an unexpected error</p>"
+        "at org.springframework.web.servlet.DispatcherServlet"
+    )
+    fw, version = st_detect_framework(body)
+    assert fw == "Spring Boot"
+    assert version is None
+
+
+def test_stacktrace_framework_clean_page_no_false_positive():
+    # A normal page mentioning "debug" loosely must NOT be attributed
+    body = "<html><body>Welcome. Toggle debug mode in settings.</body></html>"
+    fw, version = st_detect_framework(body)
+    assert fw is None
+
+
 # ─── FrameworkRecon module ────────────────────────────────────────────
 
 
@@ -814,15 +1072,6 @@ def test_framework_recon_laravel_profile_has_critical_probes():
     }
     missing = must_have - paths
     assert not missing, f"Laravel profile missing critical probes: {missing}"
-
-
-def test_framework_recon_no_cve_numbers_in_notes():
-    """Per project direction: no CVE numbers surface in the output."""
-    from shatterpoint.modules.framework_recon import _LARAVEL_PROBES
-    for probe in _LARAVEL_PROBES:
-        assert "CVE-" not in probe.note, (
-            f"Probe {probe.path} leaks CVE number: {probe.note}"
-        )
 
 
 # ─── Signature tightening regression tests ───────────────────────────

@@ -462,7 +462,9 @@ async def run_crawler(config: dict) -> dict:
         results["debug_exposure"] = merge_findings(stacktrace_findings)
         st_framework = results["debug_exposure"].get("framework")
         if st_framework:
-            tech_id = st_framework.lower()
+            # Normalise to a fingerprint id: "Spring Boot" -> "springboot"
+            # so the synthesised entry merges with the springboot signature.
+            tech_id = st_framework.lower().replace(" ", "")
             existing_ids = {t.get("id") for t in results["technologies"]}
             if tech_id not in existing_ids:
                 results["technologies"].append({
