@@ -493,6 +493,174 @@ def test_dedup_technologies_empty():
     assert dedup_technologies([]) == []
 
 
+# ─── Wave A regression tests ──────────────────────────────────────────
+
+
+def test_laravel_does_not_fire_on_bare_php_powered_by():
+    """Regression: my earlier Laravel sig had
+        headers:
+          - header: "x-powered-by"
+            pattern: "(?i)PHP"
+    which matched every PHP site (WordPress, Drupal, phpMyAdmin, …).
+    Confirmed false-positive on the WordPress lab. The Laravel sig
+    must require Laravel-specific evidence — cookies/body/forms — not
+    a bare PHP banner."""
+    fp = Fingerprinter({
+        "fingerprint": {
+            "check_headers": True, "check_cookies": True,
+            "check_meta": True, "check_scripts": True,
+        }
+    })
+    # A WordPress-like response: PHP banner + WordPress body + no
+    # Laravel-specific signals.
+    detections = fp.fingerprint_from_response(
+        "http://wp.test/",
+        {"x-powered-by": "PHP/8.3.31"},
+        "<html><body>Welcome to WordPress</body></html>",
+        cookies=None,
+    )
+    names = {d["name"] for d in detections}
+    assert "Laravel" not in names, (
+        "Laravel must not fire on bare PHP/X.Y.Z X-Powered-By — that's "
+        "emitted by every PHP framework"
+    )
+    # Sanity: PHP itself should still be detected
+    assert "PHP" in names
+
+
+def test_detect_auth_mechanisms_handles_multiple_set_cookies():
+    """Regression (Wave A A2): when a server sends multiple Set-Cookie
+    headers (Laravel apps send XSRF-TOKEN + laravel_session), the old
+    code iterated `headers.items()` and only saw the first/last after
+    dict() collapsed duplicates. Now we pass the per-cookie list."""
+    recon = ReconModule({}, "http://target.test")
+
+    # Two separate Set-Cookie response headers
+    set_cookies = [
+        "XSRF-TOKEN=abc123; HttpOnly; SameSite=Lax",
+        "laravel_session=def456; HttpOnly; Secure",
+    ]
+    auth = recon.detect_auth_mechanisms(
+        url="http://target.test/",
+        headers={},
+        body="",
+        forms=[],
+        set_cookies=set_cookies,
+    )
+    cookie_findings = [a for a in auth if a["type"] == "Session Cookie"]
+    cookie_names = {a["detail"].split("Cookie: ")[1].split(" ")[0] for a in cookie_findings}
+    assert "XSRF-TOKEN" in cookie_names, "XSRF-TOKEN session cookie should be detected"
+    assert "laravel_session" in cookie_names, "laravel_session should also be detected"
+
+
+def test_extract_cookies_handles_multiple_set_cookies():
+    """Companion to the auth test — fingerprint.py's _extract_cookies
+    must also see all Set-Cookie values when given the list."""
+    fp = Fingerprinter({"fingerprint": {}})
+    cookies = fp._extract_cookies(
+        headers={},
+        set_cookies=[
+            "XSRF-TOKEN=abc; HttpOnly",
+            "laravel_session=def; HttpOnly",
+        ],
+    )
+    assert "XSRF-TOKEN" in cookies
+    assert "laravel_session" in cookies
+
+
+def test_load_config_valid_yaml(tmp_path):
+    """Regression (Wave A A1): valid YAML loads as a dict."""
+    from shatterpoint.crawler import load_config
+
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("target:\n  url: http://x.test\ncrawler:\n  max_depth: 5\n")
+    result = load_config(str(cfg))
+    assert result["target"]["url"] == "http://x.test"
+    assert result["crawler"]["max_depth"] == 5
+
+
+def test_load_config_malformed_yaml_exits(tmp_path, capsys):
+    """Regression (Wave A A1): malformed YAML must exit loudly (non-zero),
+    not silently fall back to {} as the original code did."""
+    import pytest
+
+    from shatterpoint.crawler import load_config
+
+    cfg = tmp_path / "bad.yaml"
+    cfg.write_text("target:\n  url: http://x.test\n  : invalid : yaml :\n")
+    with pytest.raises(SystemExit) as exc:
+        load_config(str(cfg))
+    assert exc.value.code == 2
+    captured = capsys.readouterr()
+    assert "YAML syntax errors" in captured.out
+
+
+def test_load_config_explicit_missing_file_exits(tmp_path, capsys):
+    """Regression (Wave A A1): an explicit -c path pointing at a missing
+    file must exit loudly rather than silently using defaults."""
+    import pytest
+
+    from shatterpoint.crawler import load_config
+
+    with pytest.raises(SystemExit) as exc:
+        load_config(str(tmp_path / "does-not-exist.yaml"))
+    assert exc.value.code == 2
+    captured = capsys.readouterr()
+    assert "config file not found" in captured.out
+
+
+def test_load_config_default_missing_is_silent(tmp_path, monkeypatch):
+    """No -c passed AND no config.yaml in CWD must be silent (running
+    without a config is a valid mode)."""
+    from shatterpoint.crawler import load_config
+
+    monkeypatch.chdir(tmp_path)  # tmp_path has no config.yaml
+    result = load_config(None)
+    assert result == {}
+
+
+def test_parse_robots_extracts_full_sitemap_url():
+    """Regression (Wave A A4): parse_robots used to split lines on `:`
+    and mangle `Sitemap: https://example.com/x.xml` into
+    `//example.com/x.xml` (lost the scheme). Fix splits on the
+    `Sitemap:` prefix only."""
+    import asyncio
+
+    import httpx
+
+    robots_body = (
+        "User-agent: *\n"
+        "Disallow: /admin/\n"
+        "Sitemap: https://example.com/sitemap.xml\n"
+        "Sitemap: https://example.com/news-sitemap.xml\n"
+        "Sitemap:/relative-sitemap.xml\n"  # no space — edge case
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/plain"},
+            text=robots_body,
+        )
+
+    async def run() -> dict:
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(transport=transport) as client:
+            recon = ReconModule({}, "http://example.com")
+            return await recon.parse_robots(client)
+
+    result = asyncio.run(run())
+    assert result["found"] is True
+    assert "/admin/" in result["disallowed"]
+    # Full URLs preserved
+    assert "https://example.com/sitemap.xml" in result["sitemaps"]
+    assert "https://example.com/news-sitemap.xml" in result["sitemaps"]
+    # Edge case: no space after "Sitemap:" still works
+    assert "/relative-sitemap.xml" in result["sitemaps"]
+    # No mangled URLs
+    assert not any(s.startswith("//") for s in result["sitemaps"])
+
+
 # ─── Audit regressions (catch the bugs the confidence audit found) ───
 
 
@@ -916,6 +1084,50 @@ def test_fingerprint_form_field_no_match():
     )
     names = {d["name"] for d in detections}
     assert "TestOnlyLaravel" not in names
+
+
+def test_fingerprint_form_field_requires_hidden_type():
+    """Regression (Wave A audit A3): visible <input name="_token"> on an
+    unrelated app must NOT fire a Laravel-style form_fields detection.
+    Only type=hidden inputs count as CSRF-token evidence."""
+    fp = Fingerprinter({
+        "fingerprint": {
+            "check_headers": True, "check_cookies": True,
+            "check_meta": True, "check_scripts": True,
+        }
+    })
+    fp.signatures["__test_hidden_only"] = {
+        "name": "TestHiddenOnly",
+        "category": "Framework",
+        "form_fields": ["_token"],
+    }
+    # Visible text input named _token — should NOT match
+    forms_visible = [{
+        "found_on": "http://other.test/",
+        "inputs": [
+            {"tag": "input", "type": "text", "name": "_token", "value": ""},
+        ],
+    }]
+    detections = fp.fingerprint_from_response(
+        "http://other.test/", {}, "<html></html>", cookies=None, forms=forms_visible,
+    )
+    names = {d["name"] for d in detections}
+    assert "TestHiddenOnly" not in names, (
+        "form_fields must require type=hidden; visible inputs should not match"
+    )
+
+    # Hidden input — should match
+    forms_hidden = [{
+        "found_on": "http://target.test/",
+        "inputs": [
+            {"tag": "input", "type": "hidden", "name": "_token", "value": "abc"},
+        ],
+    }]
+    detections = fp.fingerprint_from_response(
+        "http://target.test/", {}, "<html></html>", cookies=None, forms=forms_hidden,
+    )
+    names = {d["name"] for d in detections}
+    assert "TestHiddenOnly" in names
 
 
 def test_fingerprint_form_field_without_forms_passed():

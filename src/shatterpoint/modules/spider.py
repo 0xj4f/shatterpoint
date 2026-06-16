@@ -21,6 +21,12 @@ class CrawlResult:
     url: str
     status_code: int = 0
     headers: dict = field(default_factory=dict)
+    # Set-Cookie values preserved as a list. `dict(httpx.Headers)`
+    # collapses duplicate headers into a comma-joined string, so a
+    # plain `headers` dict can only show one cookie even when the
+    # server sent two. We surface the raw list here for any caller
+    # that needs per-cookie iteration (auth detection, fingerprinter).
+    set_cookies: list = field(default_factory=list)
     body: str = ""
     content_type: str = ""
     redirect_chain: list = field(default_factory=list)
@@ -207,10 +213,19 @@ class Spider:
                 if "text/" in content_type or "json" in content_type or "xml" in content_type:
                     body = response.text
 
+                # Preserve all Set-Cookie values as a list. Casting to
+                # dict() collapses duplicates into a comma-joined string,
+                # which loses per-cookie evidence (laravel_session +
+                # XSRF-TOKEN both fire on Laravel apps).
+                set_cookies = response.headers.get_list("set-cookie") if hasattr(
+                    response.headers, "get_list"
+                ) else []
+
                 return CrawlResult(
                     url=url,
                     status_code=response.status_code,
                     headers=dict(response.headers),
+                    set_cookies=set_cookies,
                     body=body,
                     content_type=content_type,
                     redirect_chain=redirect_chain,

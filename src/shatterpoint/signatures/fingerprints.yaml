@@ -192,9 +192,11 @@ laravel:
   cookies:
     - "laravel_session"
     - "XSRF-TOKEN"
-  headers:
-    - header: "x-powered-by"
-      pattern: "(?i)PHP"
+  # Note: no `headers:` block here. `x-powered-by: PHP` was tempting
+  # as a "weak combine" signal but it's emitted by ALL PHP apps —
+  # WordPress, Drupal, Joomla, phpMyAdmin etc — so it's a guaranteed
+  # false-positive when used alone. PHP detection lives in its own
+  # signature; Laravel's evidence comes from cookies/body/forms/paths.
   body:
     - "laravel"
     # YAML escape note: "\\" in a double-quoted YAML string is ONE backslash

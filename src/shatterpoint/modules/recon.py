@@ -121,12 +121,14 @@ class ReconModule:
                         if path:
                             result["allowed"].append(path)
                     elif line.lower().startswith("sitemap:"):
-                        sitemap_url = line.split(":", 1)[1].strip()
-                        # Handle "Sitemap: http://..." where split on : breaks the URL
-                        if not sitemap_url.startswith("http"):
-                            sitemap_url = line.split(" ", 1)[1].strip() if " " in line else sitemap_url
-                        result["sitemaps"].append(sitemap_url)
-                        print_finding("robots.txt", f"Sitemap: {sitemap_url}")
+                        # Strip the "Sitemap:" prefix. Don't split on `:` —
+                        # that mangles full URLs like
+                        # "Sitemap: https://example.com/sitemap.xml" into
+                        # "//example.com/sitemap.xml" (scheme dropped).
+                        sitemap_url = line[len("sitemap:"):].strip()
+                        if sitemap_url:
+                            result["sitemaps"].append(sitemap_url)
+                            print_finding("robots.txt", f"Sitemap: {sitemap_url}")
             else:
                 print_status("robots.txt not found (or non-text response)")
 
@@ -318,12 +320,26 @@ class ReconModule:
         "cross-origin-resource-policy": "CORP",
     }
 
-    def detect_auth_mechanisms(self, url: str, headers: dict, body: str, forms: list[dict]) -> list[dict]:
+    def detect_auth_mechanisms(
+        self,
+        url: str,
+        headers: dict,
+        body: str,
+        forms: list[dict],
+        set_cookies: list[str] | None = None,
+    ) -> list[dict]:
         """
         Detect authentication mechanisms from response data.
         NO attacks - just identification. Security headers are handled
         separately in `detect_security_headers` — they are defensive
         policy, not authentication.
+
+        `set_cookies` is the per-cookie raw values list (one entry per
+        Set-Cookie header). When provided, we iterate that list so
+        targets sending multiple Set-Cookie headers (e.g. Laravel apps
+        sending both XSRF-TOKEN and laravel_session) are fully detected.
+        Falls back to `headers["set-cookie"]` for callers that don't
+        thread the list through (backward compat).
         """
         auth = []
 
@@ -372,26 +388,34 @@ class ReconModule:
                     "has_csrf": form.get("has_csrf_token", False),
                 })
 
-        # Check for session cookies (these ARE auth-relevant)
-        for key, value in headers.items():
-            if key.lower() == "set-cookie":
-                cookie_lower = value.lower()
-                flags = []
-                if "httponly" in cookie_lower:
-                    flags.append("HttpOnly")
-                if "secure" in cookie_lower:
-                    flags.append("Secure")
-                if "samesite" in cookie_lower:
-                    flags.append("SameSite")
+        # Check for session cookies (these ARE auth-relevant).
+        # Prefer the per-cookie list when provided; fall back to the
+        # joined value in headers["set-cookie"] (legacy path).
+        if set_cookies:
+            cookie_values = list(set_cookies)
+        else:
+            cookie_values = [
+                v for k, v in headers.items() if k.lower() == "set-cookie"
+            ]
 
-                session_indicators = ["session", "sess", "sid", "auth", "token", "jwt"]
-                if any(ind in cookie_lower for ind in session_indicators):
-                    cookie_name = value.split("=")[0].strip()
-                    auth.append({
-                        "type": "Session Cookie",
-                        "url": url,
-                        "detail": f"Cookie: {cookie_name} | Flags: {', '.join(flags) or 'NONE'}",
-                    })
+        for value in cookie_values:
+            cookie_lower = value.lower()
+            flags = []
+            if "httponly" in cookie_lower:
+                flags.append("HttpOnly")
+            if "secure" in cookie_lower:
+                flags.append("Secure")
+            if "samesite" in cookie_lower:
+                flags.append("SameSite")
+
+            session_indicators = ["session", "sess", "sid", "auth", "token", "jwt"]
+            if any(ind in cookie_lower for ind in session_indicators):
+                cookie_name = value.split("=")[0].strip()
+                auth.append({
+                    "type": "Session Cookie",
+                    "url": url,
+                    "detail": f"Cookie: {cookie_name} | Flags: {', '.join(flags) or 'NONE'}",
+                })
 
         return auth
 

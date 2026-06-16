@@ -39,15 +39,6 @@ class Extractor:
         re.IGNORECASE,
     )
 
-    # Interesting path patterns
-    INTERESTING_PATHS = re.compile(
-        r'(?:/admin|/login|/register|/signup|/upload|/dashboard|/panel|/console|'
-        r'/debug|/test|/backup|/config|/install|/setup|/phpinfo|/server-status|'
-        r'/\.env|/\.git|/\.svn|/\.htaccess|/web\.config|/crossdomain\.xml|'
-        r'/clientaccesspolicy\.xml|/swagger|/api-docs|/graphiql)',
-        re.IGNORECASE,
-    )
-
     def extract_js_endpoints(self, js_content: str, page_url: str) -> list[dict]:
         """Extract potential API endpoints from JavaScript code."""
         endpoints = set()
@@ -87,17 +78,6 @@ class Extractor:
                 })
 
         return endpoints
-
-    def find_interesting_paths(self, urls: list[str]) -> list[dict]:
-        """Flag URLs that match interesting path patterns."""
-        interesting = []
-        for url in urls:
-            if self.INTERESTING_PATHS.search(url):
-                interesting.append({
-                    "url": url,
-                    "reason": "interesting_path",
-                })
-        return interesting
 
     def extract_url_parameters(self, urls: list[str]) -> list[dict]:
         """
