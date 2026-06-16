@@ -12,6 +12,10 @@ auto-increments. See [README — Release process](README.md) for details.
 ## [Unreleased]
 
 ### Added
+- **Arbitrary auth headers via `-H "Name: value"`** (repeatable) — covers every authentication type: HTTP Basic, Bearer, Digest, NTLM/Negotiate, API keys (`X-API-Key`), `Cookie`-based sessions, and custom headers. Resolution precedence CLI `-H` > `config.auth.headers`; an explicit `-H "Authorization: ..."` overrides the `--token` bearer convenience. Applied across all clients (recon, fingerprint, framework-recon, SPA, spider).
+  - **Origin-scoped like the bearer token**: custom auth headers are stripped on cross-origin redirects so an `X-API-Key`/`Cookie` can't leak to a third party. httpx auto-strips `Authorization` cross-origin but not custom headers, so the recon client gets an origin-strip request event hook (verified empirically) and the spider strips per-hop via `should_send_auth`.
+  - **Redacted everywhere**: header values shown in the banner as `Name: first4…last4` (auth scheme word preserved, e.g. `Bearer eyJh…6Dc` / `Basic dXNl…ZA==`); raw values live only under `config['auth']` and never enter the saved JSON report (verified: scanned with secret `-H` values, 0 occurrences in the report).
+  - Malformed `-H` (no colon / empty name) is warned about and skipped.
 - **Laravel-ecosystem product CVEs** (Proving Grounds-relevant). Detected as their own products — **not** lumped under Laravel — so the CVEs only fire when the specific product is present, never on a plain Laravel site:
   - **Voyager** (DevDojo Laravel admin package): fingerprint via `voyager-assets` / `thecontrolgroup/voyager` body markers; framework-recon probes `/admin/compass` → **CVE-2024-55415** (path traversal) + **CVE-2024-55416** (XSS) and `/admin/media` → **CVE-2024-55417** (upload→RCE), with a manual pointer for the one-click RCE chain.
   - **Innoshop** (Laravel e-commerce, ≤ 0.4.1): fingerprint via brand markers; **CVE-2025-52921** (CVSS 9.9 authenticated File Manager RCE) surfaced as a manual pointer.

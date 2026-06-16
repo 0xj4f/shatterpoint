@@ -31,8 +31,12 @@ from shatterpoint.modules.spa import SPAAnalyzer
 from shatterpoint.modules.spider import Spider
 from shatterpoint.utils.auth import (
     ENV_VAR,
+    build_auth_headers,
+    redact_headers,
     redact_token,
+    resolve_headers,
     resolve_token,
+    should_send_auth,
     warn_on_expiry,
 )
 from shatterpoint.utils.formatter import (
@@ -108,6 +112,11 @@ Examples:
   # Authenticated crawl with a bearer token
   shatterpoint -u http://target.htb --token $JWT
 
+  # Arbitrary auth headers (-H is repeatable; covers all auth types)
+  shatterpoint -u http://target.htb -H "Authorization: Basic dXNlcjpwYXNz"
+  shatterpoint -u http://target.htb -H "X-API-Key: $KEY" -H "X-Tenant: acme"
+  shatterpoint -u http://target.htb -H "Cookie: session=$SID; role=admin"
+
   # SPA target (React/Vue/Angular/Next.js/Nuxt) — mines bundles & routes
   shatterpoint -u http://localhost:3001 --token $JWT --spa
 
@@ -165,8 +174,38 @@ Environment:
             "CLI > env > config."
         ),
     )
+    parser.add_argument(
+        "-H", "--header",
+        action="append",
+        metavar='"Name: value"',
+        dest="header",
+        help=(
+            "Add an arbitrary auth header (repeatable). Covers every auth type: "
+            "Basic (-H 'Authorization: Basic <b64>'), API keys (-H 'X-API-Key: ...'), "
+            "Cookie (-H 'Cookie: session=...'), NTLM/Negotiate, custom headers. "
+            "Headers are origin-scoped: stripped on cross-origin redirects, like --token. "
+            "An explicit -H 'Authorization: ...' overrides --token."
+        ),
+    )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     return parser.parse_args()
+
+
+def _make_auth_strip_hook(scheme: str, netloc: str, auth_header_names: set[str]):
+    """Build an httpx request event hook that strips auth headers when a
+    request leaves the target origin (e.g. a cross-origin redirect that
+    httpx follows). httpx auto-strips `Authorization` cross-origin but NOT
+    custom headers (X-API-Key, Cookie, ...), so this covers every -H
+    header uniformly — matching the spider's per-hop origin scoping."""
+    lowered = {n.lower() for n in auth_header_names}
+
+    async def _strip(request: "httpx.Request") -> None:
+        if not should_send_auth(scheme, netloc, str(request.url)):
+            for hname in list(request.headers.keys()):
+                if hname.lower() in lowered:
+                    del request.headers[hname]
+
+    return _strip
 
 
 async def run_crawler(config: dict) -> dict:
@@ -219,13 +258,23 @@ async def run_crawler(config: dict) -> dict:
 
     recon_cfg = config.get("recon", {})
     recon_headers = {"User-Agent": config.get("crawler", {}).get("user_agent", "")}
-    auth_token = (config.get("auth") or {}).get("token")
-    if auth_token:
-        recon_headers["Authorization"] = f"Bearer {auth_token}"
+    auth_cfg = config.get("auth") or {}
+    # Combined auth headers: bearer token (--token) + arbitrary -H headers,
+    # applied to every recon/fingerprint/framework-recon/SPA request.
+    auth_headers = build_auth_headers(auth_cfg.get("token"), auth_cfg.get("headers"))
+    recon_headers.update(auth_headers)
+    # Origin-scope them: strip on any cross-origin redirect the recon
+    # client follows (covers custom headers httpx wouldn't strip itself).
+    recon_hooks: dict = {}
+    if auth_headers:
+        recon_hooks = {"request": [_make_auth_strip_hook(
+            validator.scheme, validator.target_domain, set(auth_headers),
+        )]}
     async with httpx.AsyncClient(
         verify=False,
         headers=recon_headers,
         limits=httpx.Limits(max_connections=10),
+        event_hooks=recon_hooks,
     ) as recon_client:
         recon_results = await recon.run_all(recon_client)
         results.update(recon_results)
@@ -594,14 +643,28 @@ def main():
         })
 
     # Resolve bearer token (CLI > env > config) and stash into config.
-    # The raw token only ever lives in config['auth']['token'] — it is
+    # The raw token / header values only ever live under config['auth'] —
     # never placed into the results dict that gets serialized to disk.
     token = resolve_token(args.token, config)
     token_display = redact_token(token) if token else ""
     config.setdefault("auth", {})["token"] = token
     config["auth"]["token_display"] = token_display
 
-    print_banner(token_display=token_display)
+    # Resolve arbitrary -H auth headers (CLI > config). Malformed -H
+    # entries are warned about and skipped.
+    custom_headers, header_errors = resolve_headers(args.header, config)
+    config["auth"]["headers"] = custom_headers
+    header_display = redact_headers(custom_headers)
+    config["auth"]["headers_display"] = header_display
+
+    print_banner(token_display=token_display, header_display=header_display)
+
+    for bad in header_errors:
+        print_finding(
+            "Auth",
+            f"[bold red]WARNING:[/bold red] ignoring malformed -H header "
+            f"(expected 'Name: value'): {bad!r}",
+        )
 
     # Validate target
     target_url = config.get("target", {}).get("url", "")

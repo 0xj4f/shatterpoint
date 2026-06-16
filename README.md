@@ -10,7 +10,10 @@ OSCP-focused web reconnaissance crawler — maps attack surfaces, fingerprints t
 ║       Attack Surface Mapper & Fingerprinter           ║
 ╚═══════════════════════════════════════════════════════╝
 
-usage: shatterpoint [-h] [-u URL] [-c CONFIG] [-d DEPTH] [-p PAGES] [-t THREADS] [-o OUTPUT] [-v] [--no-fingerprint] [--no-recon] [--timeout TIMEOUT]
+usage: shatterpoint [-h] [-u URL] [-c CONFIG] [-d DEPTH] [-p PAGES]
+                    [-t THREADS] [-o OUTPUT] [-v] [--no-fingerprint]
+                    [--no-recon] [--spa] [--framework-recon]
+                    [--timeout TIMEOUT] [--token TOKEN] [-H "Name: value"]
                     [--version]
 
 shatterpoint — OSCP Recon Attack Surface Mapper
@@ -21,33 +24,42 @@ options:
   -c, --config CONFIG   Config file path
   -d, --depth DEPTH     Max crawl depth
   -p, --pages PAGES     Max pages to crawl
-  -t, --threads THREADS
-                        Concurrency level
+  -t, --threads THREADS Concurrency level
   -o, --output OUTPUT   Output directory
   -v, --verbose         Verbose output
   --no-fingerprint      Skip fingerprinting
   --no-recon            Skip recon modules
+  --spa                 Mine SPA bundles (React/Vue/Angular/Next.js/Nuxt)
+  --framework-recon     Framework CVE signal-recon (Laravel/Django/Flask/...)
   --timeout TIMEOUT     Request timeout in seconds
+  --token TOKEN         Bearer token for authenticated crawling
+  -H, --header "Name: value"
+                        Arbitrary auth header (repeatable; covers all auth types)
   --version             show program's version number and exit
 
 Examples:
   shatterpoint -u http://10.10.10.1
-  shatterpoint -u http://target.htb -d 5 -p 200
-  shatterpoint -u https://10.10.10.1:8443 -o ./loot -v
+  shatterpoint -u http://target.htb --token $JWT --framework-recon
+  shatterpoint -u http://target.htb -H "X-API-Key: $KEY" -H "X-Tenant: acme"
+  shatterpoint -u http://localhost:3001 --token $JWT --spa
   shatterpoint -c custom_config.yaml
 
 ```
 
 ## What It Does
 
-Single-pass recon against **one target domain**. No attacks — just mapping.
+Single-pass recon against **one target domain**. Signal-only — it maps and detects, it never exploits.
 
 - 🕷️ **Crawls** every in-scope page (async, 15 concurrent requests)
 - 📝 **Extracts** forms, file uploads, API endpoints, URL parameters, emails, HTML comments
 - 🔍 **Fingerprints** 25+ technologies with version detection and confidence scoring
-- 🗺️ **Probes** 70+ common paths (admin panels, backups, .git, .env, etc.)
+- 🗺️ **Probes** 70+ common paths (admin panels, backups, .git, .env, etc.) with a 404-baseline filter to kill catch-all false positives
 - 🤖 **Parses** robots.txt, sitemap.xml, security.txt
-- 🔐 **Detects** auth mechanisms (Basic, NTLM, Bearer, login forms, session cookies)
+- 🔐 **Authenticated crawling** — bearer token (`--token`) or any header (`-H`), origin-scoped and redacted
+- 🧬 **Framework CVE signal-recon** (`--framework-recon`) — Laravel, Django, Flask, Spring Boot, Next.js, Voyager, Innoshop; maps exposures to CVEs with a "verify manually" disposition (never claims "vulnerable")
+- 🪲 **Stack-trace mining** — flags debug-mode error pages, leaked filesystem paths, framework versions, secrets/DB-URIs
+- 📦 **SPA bundle mining** (`--spa`) — source maps, client-side routes, baked secrets for React/Vue/Angular/Next/Nuxt
+- 🧷 **Splits** real auth mechanisms from security headers in the report
 - 📊 **Reports** structured JSON + rich CLI output
 
 ---
@@ -93,6 +105,10 @@ shatterpoint -u http://10.10.10.1 -o ./loot/box1
 # Fast scan — skip path probing
 shatterpoint -u http://10.10.10.1 --no-recon
 
+# Authenticated crawl + framework CVE recon (see Authentication below)
+shatterpoint -u http://target.htb --token "$JWT" --framework-recon
+shatterpoint -u http://target.htb -H "X-API-Key: $KEY" -H "Cookie: session=$SID"
+
 # Use a config file
 shatterpoint -c config.yaml
 ```
@@ -102,14 +118,9 @@ shatterpoint -c config.yaml
 ## CLI Reference
 
 ```
-usage: shatterpoint [-h] [-u URL] [-c CONFIG] [-d DEPTH] [-p PAGES]
-                    [-t THREADS] [-o OUTPUT] [-v]
-                    [--no-fingerprint] [--no-recon] [--timeout TIMEOUT]
-                    [--version]
-
 options:
   -u, --url URL          Target URL
-  -c, --config CONFIG    Config file path (default: config.yaml)
+  -c, --config CONFIG    Config file path (default: config.yaml if present)
   -d, --depth DEPTH      Max crawl depth (default: 10)
   -p, --pages PAGES      Max pages to crawl (default: 500)
   -t, --threads THREADS  Concurrency level (default: 15)
@@ -117,8 +128,83 @@ options:
   -v, --verbose          Verbose output
   --no-fingerprint       Skip technology fingerprinting
   --no-recon             Skip recon modules (robots, sitemap, path probing)
+  --spa                  Mine SPA bundles (React/Vue/Angular/Next.js/Nuxt):
+                         source maps, client-side routes, baked secrets
+  --framework-recon      Framework-specific CVE signal-recon (signal-only)
   --timeout TIMEOUT      Request timeout in seconds (default: 10)
+  --token TOKEN          Bearer token; also reads $SHATTERPOINT_TOKEN / config
+  -H, --header "Name: value"
+                         Arbitrary auth header (repeatable). Covers all auth
+                         types — Basic, API key, Cookie, NTLM/Negotiate, custom
   --version              Show version
+```
+
+> `--spa` and `--framework-recon` are opt-in. Without them, shatterpoint is a pure
+> crawler + fingerprinter. SPA framework *detection* and a "rerun with --framework-recon"
+> hint still run on every scan; only the deeper mining/probing is gated behind the flags.
+
+---
+
+## Authentication
+
+Crawl behind a login by supplying credentials on the CLI. shatterpoint sends them on
+**same-origin requests only** and **strips them on cross-origin redirects**, so a token or
+cookie never leaks to a third-party host. All credential values are **redacted** in the
+banner and never written to the saved JSON report.
+
+### Bearer token — `--token`
+
+```bash
+shatterpoint -u http://target.htb --token "$JWT"
+```
+
+Resolution order: `--token` flag > `$SHATTERPOINT_TOKEN` env var > `config.yaml` `auth.token`.
+Sent as `Authorization: Bearer <token>`. If the token is a JWT, shatterpoint decodes the
+`exp` claim and warns when it's expired or expiring soon.
+
+### Any header — `-H` / `--header` (covers all auth types)
+
+`-H` is **repeatable** and takes a raw `"Name: value"` header, so it covers **every**
+authentication scheme:
+
+```bash
+# HTTP Basic
+shatterpoint -u http://target.htb -H "Authorization: Basic dXNlcjpwYXNz"
+
+# API key (and any number of extra headers)
+shatterpoint -u http://target.htb -H "X-API-Key: $KEY" -H "X-Tenant: acme"
+
+# Cookie-based session
+shatterpoint -u http://target.htb -H "Cookie: session=$SID; role=admin"
+
+# NTLM / Negotiate, or any custom scheme
+shatterpoint -u http://target.htb -H "Authorization: NTLM $TOKEN"
+```
+
+| Auth type | Example |
+|---|---|
+| Bearer / OAuth / JWT | `--token $JWT` *or* `-H "Authorization: Bearer $JWT"` |
+| HTTP Basic | `-H "Authorization: Basic <base64(user:pass)>"` |
+| HTTP Digest / NTLM / Negotiate | `-H "Authorization: <scheme> <creds>"` |
+| API key | `-H "X-API-Key: ..."` / `-H "Apikey: ..."` |
+| Cookie session | `-H "Cookie: session=..."` |
+| Multi-header (tenant, CSRF, …) | repeat `-H` as needed |
+
+**Notes**
+- Precedence: `-H` (CLI) > `config.yaml` `auth.headers`. An explicit `-H "Authorization: ..."`
+  **overrides** the `--token` bearer convenience.
+- `-H` headers are origin-scoped exactly like the bearer token (stripped on cross-origin
+  redirects) — an `X-API-Key` or `Cookie` is treated as sensitive as a token.
+- Malformed `-H` input (missing colon / empty name) is warned about and skipped.
+
+### Config-file equivalent
+
+```yaml
+auth:
+  token: null                 # bearer; or set --token / $SHATTERPOINT_TOKEN
+  headers:                    # arbitrary headers — same as repeated -H
+    X-API-Key: "your-api-key"
+    Cookie: "session=abc123"
 ```
 
 ---
@@ -160,6 +246,25 @@ recon:
   security_txt: true
   common_paths: true
   auth_detection: true
+
+framework_recon:
+  enabled: false              # same as --framework-recon
+  auto_when_detected: false   # run automatically when a supported framework is found
+  timeout: 8
+
+spa:
+  enabled: false              # same as --spa
+  auto_when_detected: false
+  source_maps: true
+  extract_secrets: true
+  max_bundles: 20
+  max_bundle_size_bytes: 5242880
+
+auth:
+  token: null                 # bearer; or --token / $SHATTERPOINT_TOKEN
+  headers: {}                 # arbitrary auth headers, same as repeated -H
+    # X-API-Key: "your-api-key"
+    # Cookie: "session=abc123"
 
 output:
   directory: "./output"

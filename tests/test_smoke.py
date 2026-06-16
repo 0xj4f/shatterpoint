@@ -24,8 +24,13 @@ from shatterpoint.modules.spa import (
 )
 from shatterpoint.modules.spider import Spider
 from shatterpoint.utils.auth import (
+    build_auth_headers,
     decode_jwt_exp,
+    parse_header,
+    redact_header_value,
+    redact_headers,
     redact_token,
+    resolve_headers,
     resolve_token,
     should_send_auth,
     warn_on_expiry,
@@ -1496,6 +1501,128 @@ def test_fingerprint_form_field_without_forms_passed():
     )
     names = {d["name"] for d in detections}
     assert "TestFormOnly" not in names
+
+
+# ─── Arbitrary auth headers (-H) ──────────────────────────────────────
+
+
+def test_parse_header_basic():
+    assert parse_header("X-API-Key: abc123") == ("X-API-Key", "abc123")
+
+
+def test_parse_header_value_with_colons():
+    # Value may contain colons (Bearer x:y, URLs, cookies) — split on first only
+    assert parse_header("Authorization: Bearer a.b:c") == ("Authorization", "Bearer a.b:c")
+    assert parse_header("Cookie: session=1; path=/") == ("Cookie", "session=1; path=/")
+
+
+def test_parse_header_malformed():
+    assert parse_header("no-colon") is None
+    assert parse_header(": empty-name") is None
+    assert parse_header("") is None
+
+
+def test_resolve_headers_cli_overrides_config_case_insensitive():
+    config = {"auth": {"headers": {"X-API-Key": "from-config", "X-Tenant": "acme"}}}
+    headers, errors = resolve_headers(["x-api-key: from-cli", "bad-header"], config)
+    # CLI wins on case-insensitive name match; config-only header kept
+    assert headers.get("x-api-key") == "from-cli"
+    assert "X-API-Key" not in headers  # old-case key removed by CI override
+    assert headers.get("X-Tenant") == "acme"
+    assert errors == ["bad-header"]
+
+
+def test_resolve_headers_empty():
+    headers, errors = resolve_headers(None, {})
+    assert headers == {}
+    assert errors == []
+
+
+def test_build_auth_headers_bearer_plus_custom():
+    out = build_auth_headers("tok", {"X-API-Key": "k"})
+    assert out["Authorization"] == "Bearer tok"
+    assert out["X-API-Key"] == "k"
+
+
+def test_build_auth_headers_explicit_authorization_overrides_token():
+    # -H "Authorization: Basic ..." must win over the --token bearer
+    out = build_auth_headers("tok", {"Authorization": "Basic dXNlcjpwYXNz"})
+    assert out["Authorization"] == "Basic dXNlcjpwYXNz"
+    assert len([k for k in out if k.lower() == "authorization"]) == 1
+
+
+def test_redact_header_value_preserves_scheme():
+    assert redact_header_value("Authorization", "Bearer " + "x" * 40).startswith("Bearer ")
+    assert "x" * 40 not in redact_header_value("Authorization", "Bearer " + "x" * 40)
+    # Non-scheme value redacted whole
+    r = redact_header_value("X-API-Key", "supersecretapikeyvalue")
+    assert "supersecretapikey" not in r
+
+
+def test_redact_headers_dict():
+    red = redact_headers({"X-API-Key": "supersecretapikeyvalue", "X-Tenant": "acme"})
+    assert "supersecretapikey" not in red["X-API-Key"]
+
+
+def test_auth_strip_hook_strips_custom_headers_cross_origin():
+    """CRITICAL precision/safety: the recon-client origin-strip hook must
+    remove custom auth headers on a cross-origin redirect (httpx only
+    auto-strips Authorization, not X-API-Key / Cookie). Empirically drives
+    the hook against a MockTransport that 302s off-origin."""
+    import asyncio
+
+    import httpx
+
+    from shatterpoint.crawler import _make_auth_strip_hook
+
+    seen: dict[str, dict] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen[str(request.url)] = {
+            k.lower(): v for k, v in request.headers.items()
+        }
+        if request.url.host == "target.test":
+            # redirect off-origin to a third party
+            return httpx.Response(302, headers={"location": "http://evil.test/landing"})
+        return httpx.Response(200, text="ok")
+
+    hook = _make_auth_strip_hook("http", "target.test", {"Authorization", "X-API-Key", "Cookie"})
+
+    async def go():
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            headers={"Authorization": "Bearer secret", "X-API-Key": "apikey", "Cookie": "s=1"},
+            event_hooks={"request": [hook]},
+        ) as client:
+            await client.get("http://target.test/start", follow_redirects=True)
+
+    asyncio.run(go())
+    # On-origin request keeps the auth headers
+    on = seen["http://target.test/start"]
+    assert on.get("x-api-key") == "apikey"
+    assert on.get("authorization") == "Bearer secret"
+    # Off-origin redirect target must have ALL auth headers stripped
+    off = seen["http://evil.test/landing"]
+    assert "x-api-key" not in off, "custom header leaked off-origin!"
+    assert "cookie" not in off, "cookie leaked off-origin!"
+    assert "authorization" not in off, "authorization leaked off-origin!"
+
+
+def test_spider_auth_headers_combined_and_origin_scoped():
+    """Spider._auth_headers_for returns bearer + custom for same-origin,
+    nothing for cross-origin."""
+    cfg = {
+        "target": {"url": "http://target.test"},
+        "auth": {"token": "tok", "headers": {"X-API-Key": "k", "Cookie": "s=1"}},
+    }
+    v = URLValidator("http://target.test")
+    sp = Spider(cfg, v)
+    same = sp._auth_headers_for("http://target.test/admin")
+    assert same["Authorization"] == "Bearer tok"
+    assert same["X-API-Key"] == "k"
+    assert same["Cookie"] == "s=1"
+    # cross-origin → nothing
+    assert sp._auth_headers_for("http://evil.test/x") == {}
 
 
 # ─── Stack-trace miner tests ──────────────────────────────────────────
