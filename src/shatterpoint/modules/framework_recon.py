@@ -236,6 +236,14 @@ _NEXTJS_PROBES: list[Probe] = [
 ]
 
 
+# ── Jenkins / GitLab (fingerprint-only CVEs — non-GET vectors) ──────────
+# Their flagship CVEs are NOT passive GET signals (Jenkins CLI file-read;
+# GitLab image-upload POST), so there are no probes — detection is "product
+# present" via the fingerprint, with the CVE surfaced as a manual pointer.
+_JENKINS_PROBES: list[Probe] = []
+_GITLAB_PROBES: list[Probe] = []
+
+
 _PROFILES: dict[str, list[Probe]] = {
     "laravel": _LARAVEL_PROBES,
     "django": _DJANGO_PROBES,
@@ -244,6 +252,8 @@ _PROFILES: dict[str, list[Probe]] = {
     "nextjs": _NEXTJS_PROBES,
     "voyager": _VOYAGER_PROBES,
     "innoshop": _INNOSHOP_PROBES,
+    "jenkins": _JENKINS_PROBES,
+    "gitlab": _GITLAB_PROBES,
 }
 
 
@@ -288,6 +298,17 @@ _MANUAL_POINTERS: dict[str, tuple[str, ...]] = {
         "CVE-2025-52921 (CVSS 9.9) — Innoshop <= 0.4.1 admin File Manager RCE: upload a "
         "file then rename it to .php (frontend-only validation, bypass in Burp), then GET "
         "it. Authenticated; verify in the admin panel & test manually.",
+    ),
+    "jenkins": (
+        "CVE-2024-23897 (CVSS 9.8) — Jenkins <= 2.441 / LTS <= 2.426.2 arbitrary file read "
+        "via the built-in CLI '@<path>' argument expansion (unauthenticated reads the first "
+        "line; full read with Overall/Read). Chains to RCE (decrypt secrets, resource-root "
+        "deserialization). CLI/websocket vector — not an HTTP GET; test manually.",
+    ),
+    "gitlab": (
+        "CVE-2021-22205 (CVSS 10.0) — GitLab CE/EE 11.9 to < 13.8.8 / 13.9.6 / 13.10.3 "
+        "unauthenticated RCE: a crafted uploaded image reaches a vulnerable ExifTool "
+        "(CVE-2021-22204). POST upload vector — not an HTTP GET; test manually.",
     ),
 }
 

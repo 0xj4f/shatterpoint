@@ -26,6 +26,7 @@ auto-increments. See [README — Release process](README.md) for details.
   - New `springboot` fingerprint signature; multi-framework debug-page attribution in the stack-trace miner (Django technical-500, Werkzeug debugger, Spring Whitelabel).
   - CVE column in the framework-recon report table + manual-pointers tree.
 - **Three new Docker labs** (`labs/django`, `labs/flask`, `labs/springboot`) on ports 8084–8086, wired into `docker-compose.yml` + `Makefile`. All six labs verified end-to-end, including a WordPress/Rails cross-check proving zero framework bleed.
+- **Jenkins + GitLab fingerprint-only CVE pointers.** Added `jenkins` and `gitlab` framework-recon profiles with **no GET probes** (their flagship CVEs are non-GET vectors) that surface manual-test guidance off the existing fingerprints: Jenkins **CVE-2024-23897** (CLI `@file` arbitrary read → RCE) and GitLab **CVE-2021-22205** (unauthenticated ExifTool image-upload RCE). Signal-only; the passivity guard and per-framework manual-pointer test stay green. Verified end-to-end against the vulnerable-software-neighborhood labs `05-jenkins-cli-fileread` and `06-gitlab-exiftool`.
 
 ### Changed
 - **`MAJOR_VERSION` / `MINOR_VERSION` hardcoded in `release.yml`** (was GitHub repo Variables) so the version line is monitored in the codebase and reviewed via PR. Also fixes the cause of the first release run not tagging.
