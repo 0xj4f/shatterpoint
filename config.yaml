@@ -45,6 +45,17 @@ recon:
   common_paths: true                  # Check for /admin, /login, etc.
   auth_detection: true                # Detect auth mechanisms (no attack)
 
+# Framework-aware deep recon
+# When a supported framework is detected (v1: Laravel), an extra
+# probe sweep targets framework-specific exposures (debug handlers,
+# env-file leaks, debug panels). Opt-in via --framework-recon flag,
+# or auto_when_detected to fire whenever a profile applies.
+# Stack-trace mining of crawl responses runs every scan regardless.
+framework_recon:
+  enabled: false                    # same as --framework-recon flag
+  auto_when_detected: false         # run automatically when a supported framework is detected
+  timeout: 8                        # per-probe timeout (seconds)
+
 # SPA (Single Page Application) analysis
 # Framework detection runs every scan; bundle mining is opt-in via --spa
 # or 'enabled: true' below (or auto-triggers when 'auto_when_detected' is set).

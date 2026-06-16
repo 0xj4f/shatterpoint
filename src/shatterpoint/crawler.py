@@ -19,7 +19,12 @@ import yaml
 
 from shatterpoint import __version__
 from shatterpoint.modules.extractor import Extractor
-from shatterpoint.modules.fingerprint import Fingerprinter, dedup_technologies
+from shatterpoint.modules.fingerprint import (
+    Fingerprinter,
+    dedup_technologies,
+    resolve_conflicts,
+)
+from shatterpoint.modules.framework_recon import FrameworkRecon
 from shatterpoint.modules.parser import HTMLParser
 from shatterpoint.modules.recon import ReconModule
 from shatterpoint.modules.spa import SPAAnalyzer
@@ -40,6 +45,7 @@ from shatterpoint.utils.formatter import (
     print_summary,
     save_report,
 )
+from shatterpoint.utils.stacktrace import merge_findings, mine_response
 from shatterpoint.utils.validator import URLValidator
 
 # Suppress SSL warnings (OSCP targets use self-signed certs)
@@ -114,6 +120,16 @@ Environment:
             "SPA framework detection runs every scan regardless of this flag."
         ),
     )
+    parser.add_argument(
+        "--framework-recon",
+        action="store_true",
+        help=(
+            "Enable framework-aware deep recon. When a supported framework "
+            "is detected (v1: Laravel), probes framework-specific paths for "
+            "common exposures (debug handlers, env file leaks, debug panels). "
+            "Stack-trace mining of crawl responses runs every scan regardless."
+        ),
+    )
     parser.add_argument("--timeout", type=int, help="Request timeout in seconds")
     parser.add_argument(
         "--token",
@@ -165,9 +181,12 @@ async def run_crawler(config: dict) -> dict:
         "all_urls": [],
         "attack_surface": {},
         "spa": {},
+        "framework_recon": {},
+        "debug_exposure": {},
     }
 
     spa_analyzer = SPAAnalyzer(config, validator, extractor, html_parser)
+    framework_recon = FrameworkRecon(config, validator)
 
     # ─── Phase 1: Pre-Crawl Recon ───────────────────────────────
     print_section("PHASE 1: Pre-Crawl Reconnaissance")
@@ -210,12 +229,23 @@ async def run_crawler(config: dict) -> dict:
             # Dedup after Phase 1.5 so the Phase 4 merge logic sees a
             # clean per-id list (avoids 6× WordPress rows in the report).
             results["technologies"] = dedup_technologies(results["technologies"])
+            # Resolve mutually-exclusive collisions (e.g. Laravel vs Rails
+            # both firing on shared <meta name="csrf-token">). Strongest
+            # evidence wins; ties keep both.
+            results["technologies"] = resolve_conflicts(
+                results["technologies"], fingerprinter.signatures
+            )
 
-        # ─── Phase 1.8: SPA Analysis ─────────────────────────────
-        # Fetch landing HTML once (needed for both detection and bundle
-        # enumeration). Use the same recon_client so auth headers apply.
-        print_section("PHASE 1.8: SPA Analysis")
+        # ─── Phase 1.6: Landing-page body detection ──────────────
+        # Fetch the landing HTML and run body/cookie/form-field
+        # fingerprint checks. This MUST happen BEFORE framework deep
+        # recon, otherwise targets that only reveal Laravel via cookies
+        # (production deploys with Ignition disabled) never trigger the
+        # deep-recon phase even when --framework-recon is set.
+        print_section("PHASE 1.6: Landing-Page Body Detection")
         landing_html = ""
+        landing_resp = None
+        landing_forms: list[dict] = []
         try:
             landing_resp = await recon_client.get(
                 target_url,
@@ -224,21 +254,53 @@ async def run_crawler(config: dict) -> dict:
             )
             landing_html = landing_resp.text or ""
         except Exception as e:
-            print_finding("SPA", f"Could not fetch landing HTML: {e}")
+            print_finding("Landing", f"Could not fetch landing HTML: {e}")
 
-        # Run fingerprint-style body matching on the landing HTML so that
-        # React/Vue/Angular/Next.js/Nuxt get tagged even when the tech
-        # path probing phase produced nothing.
         if landing_html and not config.get("_no_fingerprint"):
+            # Pass forms parsed from the landing HTML so the form_fields:
+            # signature channel can fire (Laravel _token, etc.).
+            landing_forms = html_parser.extract_forms(landing_html, target_url)
             body_detections = fingerprinter.fingerprint_from_response(
-                target_url, dict(landing_resp.headers), landing_html
+                target_url,
+                dict(landing_resp.headers) if landing_resp is not None else {},
+                landing_html,
+                forms=landing_forms,
             )
             existing_ids = {t["id"] for t in results["technologies"]}
             for det in body_detections:
                 if det["id"] not in existing_ids:
                     results["technologies"].append(det)
                     existing_ids.add(det["id"])
+            # Re-run dedup + conflict resolution after body merges so
+            # the framework_recon decision sees a clean tech list.
+            results["technologies"] = dedup_technologies(results["technologies"])
+            results["technologies"] = resolve_conflicts(
+                results["technologies"], fingerprinter.signatures,
+            )
 
+        # ─── Phase 1.7: Framework deep recon ─────────────────────
+        # Triggered when a supported framework appears in the detected
+        # techs (v1: Laravel) AND framework_recon is enabled or
+        # auto_when_detected is set. Mirrors the SPA gating pattern.
+        print_section("PHASE 1.7: Framework Deep Recon")
+        results["framework_recon"] = await framework_recon.analyze(
+            recon_client, validator.base_url, results["technologies"],
+        )
+        if (
+            results["framework_recon"].get("detected_frameworks")
+            and not results["framework_recon"].get("ran")
+        ):
+            detected = results["framework_recon"]["detected_frameworks"]
+            print_finding(
+                "Framework Recon",
+                f"{', '.join(d.title() for d in detected)} detected — "
+                "rerun with --framework-recon to probe framework-specific paths",
+            )
+
+        # ─── Phase 1.8: SPA Analysis ─────────────────────────────
+        # Landing HTML was fetched in Phase 1.6; we reuse it here so
+        # SPA mining doesn't need a second round-trip.
+        print_section("PHASE 1.8: SPA Analysis")
         results["spa"] = await spa_analyzer.analyze(
             recon_client, landing_html, validator.base_url, results["technologies"]
         )
@@ -282,6 +344,10 @@ async def run_crawler(config: dict) -> dict:
     all_auth = []
     all_security_headers = []
     all_js_endpoints = []
+    # Stack-trace mining runs on every crawled page regardless of any
+    # framework flag — it's the universal "did the server leak debug
+    # info in an error response?" check.
+    stacktrace_findings: list[tuple[str, dict]] = []
 
     extract_cfg = config.get("extract", {})
 
@@ -291,6 +357,12 @@ async def run_crawler(config: dict) -> dict:
 
         body = crawl_result.body
         headers = crawl_result.headers
+
+        # Stack-trace miner — empty dict for clean pages, populated
+        # dict for pages with debug/framework/ignition signals.
+        st = mine_response(body)
+        if st:
+            stacktrace_findings.append((url, st))
 
         # Extract forms
         if extract_cfg.get("forms", True):
@@ -353,6 +425,40 @@ async def run_crawler(config: dict) -> dict:
     results["emails"] = sorted(all_emails)
     results["parameters"] = extractor.extract_url_parameters(all_urls)
 
+    # Merge stack-trace findings into the debug_exposure block. If the
+    # stack-trace miner identified a framework that the fingerprinter
+    # didn't, synthesise a tech entry so the operator sees it in the
+    # summary tech table too.
+    if stacktrace_findings:
+        results["debug_exposure"] = merge_findings(stacktrace_findings)
+        st_framework = results["debug_exposure"].get("framework")
+        if st_framework:
+            tech_id = st_framework.lower()
+            existing_ids = {t.get("id") for t in results["technologies"]}
+            if tech_id not in existing_ids:
+                results["technologies"].append({
+                    "id": tech_id,
+                    "name": st_framework,
+                    "category": "Framework",
+                    "version": results["debug_exposure"].get("framework_version"),
+                    "matched_on": [{
+                        "method": "stacktrace",
+                        "detail": "Detected via leaked stack trace in error response",
+                    }],
+                    "confidence": "high",
+                })
+            else:
+                # Add stack-trace evidence to the existing entry
+                for tech in results["technologies"]:
+                    if tech.get("id") == tech_id:
+                        tech.setdefault("matched_on", []).append({
+                            "method": "stacktrace",
+                            "detail": "Detected via leaked stack trace in error response",
+                        })
+                        if not tech.get("version") and results["debug_exposure"].get("framework_version"):
+                            tech["version"] = results["debug_exposure"]["framework_version"]
+                        break
+
     # Deduplicate auth mechanisms
     seen_auth = set()
     unique_auth = []
@@ -383,13 +489,24 @@ async def run_crawler(config: dict) -> dict:
     # ─── Phase 4: Fingerprinting ────────────────────────────────
     if not config.get("_no_fingerprint"):
         print_section("PHASE 4: Technology Fingerprinting")
-        crawl_detections = fingerprinter.fingerprint_aggregate(crawl_results)
+        # Group forms by URL so the form_fields: signature channel can
+        # fire on the aggregated pass (Laravel _token detection, etc).
+        forms_by_url: dict[str, list[dict]] = {}
+        for f in all_forms:
+            forms_by_url.setdefault(f.get("found_on", ""), []).append(f)
+        crawl_detections = fingerprinter.fingerprint_aggregate(
+            crawl_results, forms_by_url=forms_by_url,
+        )
 
         # Append all crawl detections and run one unified dedup pass —
         # avoids the bug where Phase 4's inline merge silently dropped
         # extra evidence when entries had been duplicated by Phase 1.5.
         results["technologies"].extend(crawl_detections)
         results["technologies"] = dedup_technologies(results["technologies"])
+        # Final conflict-resolution pass after all evidence is in.
+        results["technologies"] = resolve_conflicts(
+            results["technologies"], fingerprinter.signatures
+        )
 
         for tech in results["technologies"]:
             print_finding(
@@ -435,6 +552,8 @@ def main():
         config["_no_fingerprint"] = True
     if args.spa:
         config.setdefault("spa", {})["enabled"] = True
+    if args.framework_recon:
+        config.setdefault("framework_recon", {})["enabled"] = True
     if args.no_recon:
         config.setdefault("recon", {}).update({
             "robots_txt": False,

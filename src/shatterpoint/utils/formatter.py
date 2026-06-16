@@ -160,6 +160,93 @@ def print_summary(results: dict):
             )
         console.print(tree)
 
+    # Framework deep recon — severity-tagged probe outcomes
+    fr = results.get("framework_recon", {})
+    if fr.get("ran"):
+        sev_color = {
+            "critical": "bold red",
+            "high": "red",
+            "medium": "yellow",
+            "info": "cyan",
+        }
+        summary = fr.get("summary", {})
+        console.print(
+            f"\n[bold magenta]Framework Recon:[/bold magenta] "
+            f"{', '.join(fr.get('frameworks_probed', []))} — "
+            f"[bold red]{summary.get('critical', 0)} critical[/bold red], "
+            f"[red]{summary.get('high', 0)} high[/red], "
+            f"[yellow]{summary.get('medium', 0)} medium[/yellow], "
+            f"[cyan]{summary.get('info', 0)} info[/cyan]"
+        )
+        probes = fr.get("probes", [])
+        if probes:
+            table = Table(
+                title=f"Framework-Specific Findings ({len(probes)})",
+                box=box.ROUNDED,
+                border_style="magenta",
+            )
+            table.add_column("Sev", style="bold")
+            table.add_column("Status")
+            table.add_column("Path", style="white")
+            table.add_column("Note", style="dim")
+            # Sort by severity (critical first)
+            sev_rank = {"critical": 0, "high": 1, "medium": 2, "info": 3}
+            for p in sorted(probes, key=lambda x: sev_rank.get(x.get("severity"), 4)):
+                color = sev_color.get(p.get("severity"), "white")
+                table.add_row(
+                    f"[{color}]{p.get('severity', '?').upper()}[/{color}]",
+                    str(p.get("status_code", "")),
+                    p.get("path", ""),
+                    p.get("note", "")[:80],
+                )
+            console.print(table)
+    elif fr.get("detected_frameworks"):
+        # Hint shown to operator when supported framework detected but
+        # mining wasn't enabled (also printed live during the scan).
+        console.print(
+            f"\n[yellow]Framework Recon hint:[/yellow] "
+            f"{', '.join(d.title() for d in fr['detected_frameworks'])} "
+            "detected — rerun with --framework-recon for deep probing"
+        )
+
+    # Debug exposure (stack-trace mining results) — always runs
+    de = results.get("debug_exposure", {})
+    if de and (de.get("debug_mode") or de.get("framework") or de.get("ignition_exposed")):
+        tree = Tree("[bold red]Debug Exposure (stack-trace mining)[/bold red]")
+        if de.get("debug_mode"):
+            tree.add("[bold red]debug_mode: TRUE[/bold red] — exceptions rendered to client (production misconfig)")
+        if de.get("ignition_exposed"):
+            tree.add(
+                "[bold red]ignition_exposed: TRUE[/bold red] — "
+                "Laravel Ignition error handler reachable on this target"
+            )
+        if de.get("framework"):
+            ver = de.get("framework_version") or "version unknown"
+            tree.add(f"[yellow]framework:[/yellow] {de['framework']} ({ver})")
+        if de.get("php_version"):
+            tree.add(f"[yellow]php_version:[/yellow] {de['php_version']}")
+        if de.get("install_path"):
+            tree.add(f"[yellow]install_path:[/yellow] [white]{de['install_path']}[/white]")
+        for p in de.get("filesystem_paths", [])[:10]:
+            tree.add(f"[dim]filesystem path:[/dim] {p}")
+        for e in de.get("leaked_emails", []):
+            tree.add(f"[red]leaked email:[/red] {e}")
+        for ip in de.get("leaked_internal_ips", []):
+            tree.add(f"[red]leaked internal IP:[/red] {ip}")
+        for h in de.get("leaked_hostnames", []):
+            tree.add(f"[red]leaked hostname:[/red] {h}")
+        for c in de.get("leaked_cloud_ids", []):
+            val = c.get("value_redacted") or c.get("value", "")
+            tree.add(f"[red]leaked cloud ID:[/red] [bold]{c.get('type')}[/bold] {val}")
+        for d in de.get("leaked_db_uris", []):
+            uri = d.get("redacted_uri", "")
+            pwd = d.get("password_redacted")
+            extra = f" (password: {pwd})" if pwd else ""
+            tree.add(f"[red]leaked DB URI:[/red] {uri}{extra}")
+        if de.get("evidence_urls"):
+            tree.add(f"[dim]seen in: {', '.join(de['evidence_urls'][:3])}[/dim]")
+        console.print(tree)
+
     # Robots/Sitemap
     robots = results.get("robots_txt", {})
     if robots.get("found"):
