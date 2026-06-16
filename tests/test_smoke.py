@@ -980,6 +980,104 @@ def test_manual_pointers_present_for_each_framework():
     assert "CVE-2021-44228" in spring_text  # Log4Shell
 
 
+# ─── Voyager / Innoshop product CVE detection ─────────────────────────
+
+
+def test_voyager_fingerprint_matches_voyager_admin():
+    """Voyager admin page (voyager-assets / thecontrolgroup markers) → detected."""
+    fp = Fingerprinter({
+        "fingerprint": {
+            "check_headers": True, "check_cookies": True,
+            "check_meta": True, "check_scripts": True,
+        }
+    })
+    body = (
+        '<html><head><link href="/voyager-assets/css/app.css">'
+        '<script src="/voyager-assets/js/voyager.js"></script></head>'
+        '<body>thecontrolgroup/voyager admin</body></html>'
+    )
+    detections = fp.fingerprint_from_response("http://t/admin/login", {}, body, cookies=None)
+    names = {d["name"] for d in detections}
+    assert "Voyager (Laravel Admin)" in names
+
+
+def test_voyager_profile_maps_cves():
+    from shatterpoint.modules.framework_recon import _PROFILES
+
+    by_path = {p.path: p for p in _PROFILES["voyager"]}
+    assert by_path["/admin/compass"].cve == "CVE-2024-55415"
+    assert by_path["/admin/media"].cve == "CVE-2024-55417"
+    assert by_path["/admin/media"].severity == "critical"
+
+
+def test_voyager_fingerprint_has_no_generic_admin_paths():
+    """Precision regression: the Voyager FINGERPRINT must not carry
+    /admin/* paths. The fingerprinter follows redirects, so a framework
+    whose /admin/* 302s to a 200 login (Django, etc.) would falsely
+    match Voyager. /admin/compass lives in the framework_recon profile
+    (content-gated) instead."""
+    from pathlib import Path as _P
+
+    import yaml
+
+    sig_path = _P("src/shatterpoint/signatures/fingerprints.yaml")
+    sigs = yaml.safe_load(sig_path.read_text())
+    voyager_paths = sigs.get("voyager", {}).get("paths", [])
+    assert voyager_paths == [], (
+        f"Voyager fingerprint must rely on body markers, not /admin paths; got {voyager_paths}"
+    )
+
+
+def test_innoshop_fingerprint_and_cve_pointer():
+    fp = Fingerprinter({
+        "fingerprint": {
+            "check_headers": True, "check_cookies": True,
+            "check_meta": True, "check_scripts": True,
+        }
+    })
+    body = '<html><body><footer>Powered by Innoshop</footer></body></html>'
+    detections = fp.fingerprint_from_response("http://t/", {}, body, cookies=None)
+    assert "Innoshop" in {d["name"] for d in detections}
+
+    from shatterpoint.modules.framework_recon import _MANUAL_POINTERS
+    assert any("CVE-2025-52921" in p for p in _MANUAL_POINTERS["innoshop"])
+
+
+def test_voyager_innoshop_do_not_fire_on_plain_laravel():
+    """PRECISION: a plain Laravel page (no Voyager/Innoshop markers) must
+    NOT be fingerprinted as Voyager or Innoshop — these CVEs only apply
+    when the specific product is present."""
+    fp = Fingerprinter({
+        "fingerprint": {
+            "check_headers": True, "check_cookies": True,
+            "check_meta": True, "check_scripts": True,
+        }
+    })
+    body = (
+        '<html><body>laravel app, Illuminate\\Routing in a stack trace, '
+        '/vendor/laravel/framework/ path</body></html>'
+    )
+    detections = fp.fingerprint_from_response(
+        "http://t/", {"set-cookie": "laravel_session=x"}, body, cookies={"laravel_session": "x"},
+    )
+    names = {d["name"] for d in detections}
+    assert "Laravel" in names
+    assert "Voyager (Laravel Admin)" not in names
+    assert "Innoshop" not in names
+
+
+def test_voyager_runtime_probe_fires_on_compass():
+    """End-to-end: a Voyager target (compass returns Voyager content) →
+    CVE-2024-55415 finding; the catch-all/no-marker case is dropped."""
+    from shatterpoint.modules.framework_recon import _PROFILES
+
+    compass = next(p for p in _PROFILES["voyager"] if p.path == "/admin/compass")
+    hit = _run_probe_sync(compass, 200, "<html>Voyager Compass dashboard</html>")
+    assert hit is not None and hit.cve == "CVE-2024-55415"
+    # Generic 200 without Voyager markers → gated out (no false positive)
+    assert _run_probe_sync(compass, 200, "<html>unrelated 200 page</html>") is None
+
+
 # ─── Multi-framework debug detection (stacktrace) ─────────────────────
 
 

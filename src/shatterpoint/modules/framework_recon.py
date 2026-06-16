@@ -196,6 +196,35 @@ _SPRINGBOOT_PROBES: list[Probe] = [
 ]
 
 
+# ── Voyager (Laravel admin package) ────────────────────────────────────
+# The profile only runs once the `voyager` fingerprint has matched, so a
+# 302-to-login on these Voyager-unique routes is still a real signal
+# (stock Laravel has no /admin/compass or /admin/media route at all).
+_VOYAGER_PROBES: list[Probe] = [
+    Probe("/admin/compass", "high",
+          "Voyager Compass endpoint — CVE-2024-55415 path traversal (arbitrary file "
+          "read/delete) + CVE-2024-55416 reflected XSS; verify Voyager <= 1.8.0 & test manually",
+          cve="CVE-2024-55415",
+          confirm_any=("voyager", "compass")),
+    Probe("/admin/media", "critical",
+          "Voyager media manager — CVE-2024-55417 arbitrary file upload → RCE "
+          "(authenticated, file-type check bypassable); verify Voyager <= 1.8.0 & test manually",
+          cve="CVE-2024-55417",
+          confirm_any=("voyager", "media")),
+    Probe("/admin/login", "info",
+          "Voyager admin login panel — credential/brute-force surface",
+          confirm_any=("voyager",)),
+]
+
+
+# ── Innoshop (Laravel e-commerce app) ──────────────────────────────────
+# The CVE-2025-52921 File Manager RCE is authenticated and lives in the
+# admin panel; the exact endpoint is verified in-app. Detection here is
+# "Innoshop is present" (via the fingerprint), with the CVE surfaced as a
+# manual pointer rather than a fabricated endpoint probe (precision).
+_INNOSHOP_PROBES: list[Probe] = []
+
+
 # ── Next.js (server-side React) ────────────────────────────────────────
 _NEXTJS_PROBES: list[Probe] = [
     Probe("/api/auth/providers", "info",
@@ -213,6 +242,8 @@ _PROFILES: dict[str, list[Probe]] = {
     "flask": _FLASK_PROBES,
     "springboot": _SPRINGBOOT_PROBES,
     "nextjs": _NEXTJS_PROBES,
+    "voyager": _VOYAGER_PROBES,
+    "innoshop": _INNOSHOP_PROBES,
 }
 
 
@@ -246,6 +277,17 @@ _MANUAL_POINTERS: dict[str, tuple[str, ...]] = {
         "Next.js < 12.3.5 / 13.5.9 / 14.2.25 / 15.2.3.",
         "Run shatterpoint with --spa for bundle / source-map / baked-secret mining "
         "of the React/Next client.",
+    ),
+    "voyager": (
+        "CVE-2024-55415 + CVE-2024-55416 + CVE-2024-55417 chain → one-click RCE on "
+        "Voyager <= 1.8.0: trick an authed admin into a malicious /admin/compass link "
+        "(XSS) to drive a media upload (web shell). Authenticated; verify version & "
+        "test manually. No patch as of disclosure.",
+    ),
+    "innoshop": (
+        "CVE-2025-52921 (CVSS 9.9) — Innoshop <= 0.4.1 admin File Manager RCE: upload a "
+        "file then rename it to .php (frontend-only validation, bypass in Burp), then GET "
+        "it. Authenticated; verify in the admin panel & test manually.",
     ),
 }
 

@@ -238,6 +238,40 @@ laravel:
     - "django"
     - "symfony"
 
+# Voyager — a Laravel admin-panel PACKAGE (thecontrolgroup/devdojo).
+# Detected as its own product (not lumped under Laravel) so its CVEs
+# only fire when Voyager is actually present, never on a plain Laravel
+# site. Runs ON Laravel, so NOT incompatible_with laravel.
+voyager:
+  name: "Voyager (Laravel Admin)"
+  category: "Laravel Package"
+  # Body markers only — they're Voyager-unique and can't false-positive.
+  # We deliberately do NOT list /admin/compass as a fingerprint path:
+  # the fingerprinter follows redirects, so a framework whose /admin/*
+  # 302s to a login (Django, etc.) would land on a 200 and falsely match.
+  # /admin/compass is probed in the framework_recon Voyager profile
+  # instead, where it's content-gated AND only runs after this body
+  # fingerprint has already confirmed Voyager.
+  body:
+    - "voyager-assets"
+    - "thecontrolgroup/voyager"
+    - "devdojo/voyager"
+    - "voyager.js"
+
+# Innoshop — a Laravel-based e-commerce application. Detected by its
+# brand markers; its CVE is authenticated (admin File Manager) so the
+# signal is "product present", mapped to the CVE as a manual pointer.
+innoshop:
+  name: "Innoshop"
+  category: "Laravel App"
+  body:
+    - "Powered by Innoshop"
+    - "innoshop"
+    - "Innoshop"
+  meta:
+    - name: "generator"
+      pattern: "(?i)innoshop\\s*([\\d.]+)?"
+
 aspnet:
   name: "ASP.NET"
   category: "Framework"
