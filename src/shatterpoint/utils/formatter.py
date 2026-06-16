@@ -40,11 +40,18 @@ def _build_banner_text(version: str) -> str:
 BANNER_TEXT = _build_banner_text(__version__)
 
 
-def print_banner(token_display: str = ""):
-    """Print the tool banner, optionally followed by a redacted auth line."""
+def print_banner(token_display: str = "", header_display: dict | None = None):
+    """Print the tool banner, optionally followed by redacted auth lines.
+
+    `token_display` is the redacted --token bearer value. `header_display`
+    is {name: redacted_value} for arbitrary -H auth headers. Raw secrets
+    are never printed.
+    """
     console.print(f"\n[bold red]{BANNER_TEXT}[/bold red]\n")
     if token_display:
         console.print(f"  [bold yellow]Auth:[/bold yellow] Bearer {token_display}")
+    for name, value in (header_display or {}).items():
+        console.print(f"  [bold yellow]Header:[/bold yellow] {name}: {value}")
 
 
 def print_status(msg: str, style: str = "bold cyan"):

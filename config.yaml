@@ -69,10 +69,17 @@ spa:
 
 # Authentication (optional)
 # For authenticated crawling. Precedence: --token CLI > SHATTERPOINT_TOKEN env > this field.
-# The token is sent as "Authorization: Bearer <token>" to same-origin requests only;
-# it is automatically stripped on cross-origin redirects.
+# Auth material is sent to same-origin requests only and stripped on
+# cross-origin redirects (so credentials never leak to a third party).
 auth:
   token: null                         # JWT or opaque bearer; leave null for unauthenticated crawls
+  # Arbitrary auth headers — covers every auth type (Basic, API key,
+  # Cookie, NTLM/Negotiate, custom). Equivalent to repeated -H flags.
+  # An explicit Authorization here/-H overrides the bearer token above.
+  headers: {}
+    # Authorization: "Basic dXNlcjpwYXNz"
+    # X-API-Key: "your-api-key"
+    # Cookie: "session=abc123"
 
 # Output
 output:

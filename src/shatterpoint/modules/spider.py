@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 
 import httpx
 
-from shatterpoint.utils.auth import should_send_auth
+from shatterpoint.utils.auth import build_auth_headers, should_send_auth
 from shatterpoint.utils.formatter import print_finding, print_status
 from shatterpoint.utils.validator import URLValidator
 
@@ -56,10 +56,13 @@ class Spider:
             "Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/115.0",
         )
 
-        # Auth: bearer token is applied per-request (not on the client)
-        # so the manual redirect loop in _fetch can strip it when a hop
-        # leaves the original origin.
-        self.auth_token: str | None = (config.get("auth") or {}).get("token")
+        # Auth: bearer token + arbitrary -H headers are applied per-request
+        # (not on the client) so the manual redirect loop in _fetch can
+        # strip ALL of them when a hop leaves the original origin — a
+        # custom X-API-Key or Cookie is just as sensitive as the bearer.
+        auth_cfg = config.get("auth") or {}
+        self.auth_token: str | None = auth_cfg.get("token")
+        self.auth_headers: dict = auth_cfg.get("headers") or {}
         self.target_scheme = validator.scheme
         self.target_netloc = validator.target_domain
 
@@ -73,12 +76,12 @@ class Spider:
         self._semaphore = asyncio.Semaphore(self.concurrency)
 
     def _auth_headers_for(self, url: str) -> dict:
-        """Return Authorization header dict if the token is safe to send to
-        `url` (same origin as target), otherwise an empty dict."""
-        if not self.auth_token:
+        """Return the combined auth headers (bearer + custom -H) when they
+        are safe to send to `url` (same origin as target), else empty."""
+        if not self.auth_token and not self.auth_headers:
             return {}
         if should_send_auth(self.target_scheme, self.target_netloc, url):
-            return {"Authorization": f"Bearer {self.auth_token}"}
+            return build_auth_headers(self.auth_token, self.auth_headers)
         return {}
 
     async def crawl(self, seed_urls: list[str] | None = None) -> dict[str, CrawlResult]:

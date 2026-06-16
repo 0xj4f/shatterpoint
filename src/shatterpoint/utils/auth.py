@@ -3,11 +3,13 @@ Authentication helpers for shatterpoint.
 
 Pure functions for:
   - resolving a bearer token with CLI > env > config precedence
-  - redacting tokens for safe display in logs/reports
+  - resolving arbitrary `-H "Name: value"` auth headers (covers Basic,
+    Bearer, Digest, NTLM/Negotiate, API keys, Cookie, custom schemes)
+  - redacting tokens / header values for safe display in logs/reports
   - decoding the `exp` claim from JWTs (best-effort)
   - warning when a JWT is expired or expiring soon
-  - deciding whether the Authorization header is safe to send to a
-    given URL (used for redirect-strip logic)
+  - deciding whether auth material is safe to send to a given URL
+    (used for redirect-strip logic so credentials never leak off-origin)
 
 None of these helpers make network calls. None raise on bad input —
 opaque or malformed tokens return None from the decode helpers so the
@@ -22,6 +24,10 @@ from urllib.parse import urlparse
 
 ENV_VAR = "SHATTERPOINT_TOKEN"
 _DEFAULT_PORTS = {"http": 80, "https": 443}
+
+# Authorization schemes whose credential we redact while keeping the
+# scheme word visible (so "Bearer eyJ…" shows the scheme but not the secret).
+_AUTH_SCHEMES = ("bearer", "basic", "digest", "negotiate", "ntlm", "token", "apikey")
 
 
 def resolve_token(cli_token: str | None, config: dict) -> str | None:
@@ -126,3 +132,94 @@ def should_send_auth(
         )
     except Exception:
         return False
+
+
+# ─── Arbitrary auth headers (-H "Name: value") ────────────────────────
+
+
+def parse_header(raw: str) -> tuple[str, str] | None:
+    """Parse a `-H "Name: value"` string into (name, value).
+
+    Splits on the first colon (values may contain colons, e.g. a URL or
+    `Bearer x:y`). Returns None if the input has no colon or an empty
+    name, so the caller can warn on malformed input. The value may be
+    empty (some headers are sent bare).
+    """
+    if not raw or ":" not in raw:
+        return None
+    name, _, value = raw.partition(":")
+    name = name.strip()
+    if not name:
+        return None
+    return name, value.strip()
+
+
+def _set_ci(headers: dict, name: str, value: str) -> None:
+    """Set headers[name]=value, replacing any existing key that matches
+    case-insensitively (HTTP header names are case-insensitive)."""
+    for existing in [h for h in headers if h.lower() == name.lower()]:
+        headers.pop(existing)
+    headers[name] = value
+
+
+def resolve_headers(
+    cli_headers: list[str] | None, config: dict
+) -> tuple[dict[str, str], list[str]]:
+    """Resolve arbitrary auth headers from CLI `-H` + config['auth']['headers'].
+
+    Precedence: CLI `-H` overrides config on a case-insensitive name match.
+    Returns (headers, errors) where `errors` lists the malformed `-H`
+    strings so the caller can warn. Never raises.
+    """
+    headers: dict[str, str] = {}
+    cfg = (config.get("auth") or {}).get("headers") or {}
+    if isinstance(cfg, dict):
+        for k, v in cfg.items():
+            if k and v is not None:
+                _set_ci(headers, str(k), str(v))
+
+    errors: list[str] = []
+    for raw in cli_headers or []:
+        parsed = parse_header(raw)
+        if parsed is None:
+            errors.append(raw)
+            continue
+        _set_ci(headers, parsed[0], parsed[1])
+    return headers, errors
+
+
+def build_auth_headers(
+    token: str | None, custom_headers: dict[str, str] | None
+) -> dict[str, str]:
+    """Combine the `--token` bearer header with arbitrary `-H` headers.
+
+    The bearer token sets `Authorization: Bearer <token>` first; an
+    explicit `-H "Authorization: ..."` then overrides it (the general
+    mechanism wins over the convenience flag). Returns the full header
+    dict applied to authenticated requests.
+    """
+    out: dict[str, str] = {}
+    if token:
+        out["Authorization"] = f"Bearer {token}"
+    for name, value in (custom_headers or {}).items():
+        _set_ci(out, name, value)
+    return out
+
+
+def redact_header_value(name: str, value: str) -> str:
+    """Redact a header value for safe display, keeping an auth scheme word.
+
+    "Bearer eyJ…xyz"  -> "Bearer eyJh…xyz9"  (scheme kept, credential redacted)
+    "abc123secretkey" -> "abc1…tkey"          (whole value redacted)
+    """
+    if not value:
+        return ""
+    scheme, _, cred = value.partition(" ")
+    if cred and scheme.lower() in _AUTH_SCHEMES:
+        return f"{scheme} {redact_token(cred)}"
+    return redact_token(value)
+
+
+def redact_headers(headers: dict[str, str]) -> dict[str, str]:
+    """Return {name: redacted_value} for banner/report display."""
+    return {name: redact_header_value(name, value) for name, value in headers.items()}
