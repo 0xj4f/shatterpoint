@@ -14,6 +14,61 @@ from shatterpoint.utils.baseline import fetch_baseline
 from shatterpoint.utils.formatter import print_finding, print_status
 
 
+def resolve_conflicts(techs: list[dict], signatures: dict) -> list[dict]:
+    """Drop weaker tech detections that conflict with a stronger one.
+
+    A signature can declare `incompatible_with: [other_id, ...]`. When
+    two techs that are mutually incompatible both fire (classic example:
+    Laravel and Rails both matching `<meta name="csrf-token">`), keep
+    the one with strictly stronger evidence and drop the other.
+
+    Strength ranking, in order:
+      1. number of distinct detection methods in matched_on
+      2. number of matched_on entries
+      3. confidence (high > medium > low > unknown)
+    Tie → keep both (let the operator decide; we don't guess).
+
+    `signatures` is the full Fingerprinter.signatures dict so we can
+    look up each id's `incompatible_with` list.
+    """
+    if not techs or not signatures:
+        return list(techs)
+
+    confidence_rank = {"high": 3, "medium": 2, "low": 1, "?": 0, None: 0, "": 0}
+
+    def strength(t: dict) -> tuple[int, int, int]:
+        matched = t.get("matched_on") or []
+        methods = {m.get("method") for m in matched if isinstance(m, dict)}
+        return (
+            len(methods),
+            len(matched),
+            confidence_rank.get(t.get("confidence"), 0),
+        )
+
+    # Build id → tech mapping (assumes dedup_technologies already ran)
+    by_id = {t["id"]: t for t in techs if t.get("id")}
+    dropped: set[str] = set()
+
+    for tech in techs:
+        tid = tech.get("id")
+        if not tid or tid in dropped:
+            continue
+        incompatibles = (signatures.get(tid) or {}).get("incompatible_with") or []
+        for other_id in incompatibles:
+            if other_id == tid or other_id in dropped or other_id not in by_id:
+                continue
+            other = by_id[other_id]
+            s_this = strength(tech)
+            s_other = strength(other)
+            if s_this > s_other:
+                dropped.add(other_id)
+            elif s_other > s_this:
+                dropped.add(tid)
+                break  # `tech` is gone; stop checking its incompatibles
+
+    return [t for t in techs if t.get("id") not in dropped]
+
+
 def dedup_technologies(techs: list[dict]) -> list[dict]:
     """Merge technology detections by id.
 
@@ -85,29 +140,46 @@ class Fingerprinter:
             print_finding("Fingerprint", f"Failed to load signatures: {e}")
 
     def fingerprint_from_response(
-        self, url: str, headers: dict, body: str, cookies: dict | None = None
+        self,
+        url: str,
+        headers: dict,
+        body: str,
+        cookies: dict | None = None,
+        forms: list[dict] | None = None,
     ) -> list[dict]:
         """
         Run all fingerprint checks against a single response.
         Returns list of detected technologies.
+
+        `forms` is an optional list of HTMLParser.extract_forms() output
+        used by the `form_fields:` signature channel — frameworks often
+        leave fingerprintable hidden input names (Laravel `_token`,
+        Django `csrfmiddlewaretoken`, Rails `authenticity_token`, etc).
         """
         detections = []
 
         for tech_id, sig in self.signatures.items():
-            result = self._check_signature(tech_id, sig, headers, body, cookies)
+            result = self._check_signature(tech_id, sig, headers, body, cookies, forms)
             if result:
                 detections.append(result)
 
         return detections
 
     def fingerprint_aggregate(
-        self, crawl_results: dict
+        self,
+        crawl_results: dict,
+        forms_by_url: dict[str, list[dict]] | None = None,
     ) -> list[dict]:
         """
         Aggregate fingerprinting across all crawled pages.
         Merges detections and calculates confidence scores.
+
+        `forms_by_url` lets the form_fields: signature channel fire on
+        the aggregated pass (Laravel `_token` etc.). Caller passes the
+        Phase 3 forms keyed by their found_on URL.
         """
         all_detections: dict[str, dict] = {}
+        forms_by_url = forms_by_url or {}
 
         for url, result in crawl_results.items():
             if result.error or not result.headers:
@@ -117,7 +189,11 @@ class Fingerprinter:
             cookies = self._extract_cookies(result.headers)
 
             detections = self.fingerprint_from_response(
-                url, result.headers, result.body, cookies
+                url,
+                result.headers,
+                result.body,
+                cookies,
+                forms=forms_by_url.get(url),
             )
 
             for det in detections:
@@ -241,11 +317,35 @@ class Fingerprinter:
         return detections
 
     def _check_signature(
-        self, tech_id: str, sig: dict, headers: dict, body: str, cookies: dict | None
+        self,
+        tech_id: str,
+        sig: dict,
+        headers: dict,
+        body: str,
+        cookies: dict | None,
+        forms: list[dict] | None = None,
     ) -> dict | None:
         """Check a single technology signature against response data."""
         matched_on = []
         version = None
+
+        # Check form field names. Many frameworks have characteristic
+        # hidden input names (Laravel _token, Django csrfmiddlewaretoken,
+        # Rails authenticity_token, Spring _csrf). The match is on the
+        # input's `name` attribute regardless of input type.
+        form_fields = sig.get("form_fields", [])
+        if form_fields and forms:
+            wanted = {f.lower() for f in form_fields if isinstance(f, str)}
+            for form in forms:
+                for inp in form.get("inputs", []):
+                    name = (inp.get("name") or "").lower()
+                    if name and name in wanted:
+                        matched_on.append({
+                            "method": "form_field",
+                            "detail": f"Form has hidden field: {inp.get('name')}",
+                        })
+                        # One per form is enough; don't re-fire on every input
+                        break
 
         # Check headers
         if self.config.get("check_headers", True):

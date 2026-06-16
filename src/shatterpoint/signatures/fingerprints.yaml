@@ -166,14 +166,25 @@ express:
 rails:
   name: "Ruby on Rails"
   category: "Framework"
+  # Rails-specific evidence only. The `<meta name="csrf-token">` tag is
+  # NOT a Rails marker — Laravel, Symfony and many SPA scaffolds emit
+  # the same tag, so matching on it produces guaranteed false positives.
   headers:
     - header: "x-powered-by"
       pattern: "(?i)phusion passenger"
+    - header: "x-runtime"
+      pattern: "."
   cookies:
     - "_session_id"
-  meta:
-    - name: "csrf-token"
-      pattern: ".*"
+    - "_rails_session"
+  body:
+    - "rails-ujs"
+    - "data-turbo"
+    - "Started GET"
+  incompatible_with:
+    - "laravel"
+    - "django"
+    - "symfony"
 
 laravel:
   name: "Laravel"
@@ -181,8 +192,29 @@ laravel:
   cookies:
     - "laravel_session"
     - "XSRF-TOKEN"
+  headers:
+    - header: "x-powered-by"
+      pattern: "(?i)PHP"
   body:
     - "laravel"
+    # YAML escape note: "\\" in a double-quoted YAML string is ONE backslash
+    # in the resulting Python string. Real Laravel error pages render
+    # namespaces with single backslashes ("Illuminate\Routing\..."), not
+    # doubled. The pre-fix value "\\\\" gave Python "\\" (two backslashes)
+    # which never matched real Laravel output.
+    - "Illuminate\\Routing"
+    - "Illuminate\\Foundation"
+    - "/vendor/laravel/framework/"
+    - "Symfony\\Component\\HttpKernel"
+  paths:
+    - "/_ignition/health-check"
+  form_fields:
+    - "_token"
+    - "_method"
+  incompatible_with:
+    - "rails"
+    - "django"
+    - "symfony"
 
 aspnet:
   name: "ASP.NET"
@@ -224,8 +256,14 @@ jquery:
 bootstrap:
   name: "Bootstrap"
   category: "CSS Framework"
+  # Body patterns must be Bootstrap CSS-framework-specific. Plain
+  # "bootstrap" false-fires on Laravel's /bootstrap/app.php file path
+  # in stack traces and any PHP framework's bootstrapping comments.
   body:
-    - "bootstrap"
+    - "bootstrap.min.css"
+    - "navbar-toggler"
+    - "container-fluid"
+    - "data-bs-toggle"
   scripts:
     - pattern: "bootstrap[.-]([\\d.]+)(?:\\.min)?\\.js"
 
@@ -296,11 +334,21 @@ webmin:
 grafana:
   name: "Grafana"
   category: "Monitoring"
+  # Grafana-specific paths only. `/login` was producing false positives
+  # on every framework that ships an auth scaffold (Laravel, Rails,
+  # Django, Spring Security, …).
   paths:
     - "/api/health"
-    - "/login"
+    - "/api/datasources"
+    - "/public/build/runtime"
+  headers:
+    - header: "x-grafana-org-id"
+      pattern: "."
+  cookies:
+    - "grafana_session"
   body:
-    - "grafana"
+    - "grafana-app"
+    - "grafanaBootData"
 
 jenkins:
   name: "Jenkins"

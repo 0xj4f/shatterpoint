@@ -11,8 +11,33 @@ auto-increments. See [README — Release process](README.md) for details.
 
 ## [Unreleased]
 
+### Added
+- **Framework deep recon** (`--framework-recon`). New Phase 1.7 module that runs framework-specific path probes when a supported framework is detected. v1 ships a **Laravel intel pack**: `/_ignition/health-check`, `/_ignition/execute-solution`, `/telescope`, `/horizon`, `/log-viewer`, `/storage/logs/laravel.log`, `/.env` (+ `.bak` / `.example` / `.production` / `.local` variants), `/composer.json`, `/composer.lock`, `/artisan`, `/server.php`, `/api/user`, `/sanctum/csrf-cookie`, `/livewire/livewire.js`. Severity-tagged. 404-baseline filtered. **No CVE numbers in output** — surfaces the exposure and stops there.
+- **Stack-trace miner** (`utils/stacktrace.py`). Runs on every crawled response. Extracts: debug-mode flag (when exceptions render to the client), framework + version (Laravel via Illuminate / Symfony / vendor-path markers), filesystem install path, Ignition exposure flag, PHP version. PII pass: leaked emails (within stack-trace context), RFC 1918 internal IPs, internal hostnames (`*.internal` / `*.local` / `*.svc.cluster.local`), AWS access keys (redacted) / ARNs / EC2 instance IDs, database connection URIs with credentials redacted to `scheme://user:***@host:port/db`.
+- **Conflict resolution** for fingerprints (`resolve_conflicts`). Signatures can declare `incompatible_with:`; when mutually exclusive techs both fire, strongest evidence wins (most distinct methods, then most matches, then highest confidence). Ties keep both.
+- **Form-field signature channel** (`form_fields:` in fingerprints.yaml). Frameworks with characteristic hidden form field names (Laravel `_token`, `_method`) now contribute fingerprint evidence.
+- **`framework_recon` + `debug_exposure` sections** in the JSON report and Rich CLI summary. Severity-tagged table for framework-recon probes; tree view for debug exposures.
+- 41 new unit tests covering the stack-trace miner, conflict resolution, form-field signatures, FrameworkRecon orchestration, and the false-positive fixes below.
+
+### Changed
+- **Rails signature tightened**: removed blanket `<meta name="csrf-token">` match (collided with Laravel and every other CSRF-using framework). Now requires Rails-specific evidence: `x-runtime` header, `_session_id` / `_rails_session` cookie, `rails-ujs` / `data-turbo` / `Started GET` body markers. Declares `incompatible_with: [laravel, django, symfony]`.
+- **Grafana signature tightened**: removed `/login` (every framework has /login). Now requires Grafana-specific evidence: `x-grafana-org-id` header, `grafana_session` cookie, `grafana-app` / `grafanaBootData` body markers, `/api/datasources` or `/public/build/runtime` paths.
+- **Laravel signature strengthened**: added `Illuminate\\` namespace marker, `/vendor/laravel/framework/` body string, `Symfony\\Component\\HttpKernel` marker, `_token` / `_method` form fields, `/_ignition/health-check` path. Declares `incompatible_with: [rails, django, symfony]`.
+
 ### Fixed
+- **Pipeline ordering bug**: framework_recon ran BEFORE the landing-page body detection that's the only way to identify Laravel on production targets with Ignition disabled. New Phase 1.6 fetches the landing HTML and runs body/cookie/form-field detection (and re-runs dedup + conflict resolution) BEFORE Phase 1.7. SPA analysis now reuses the already-fetched landing HTML in Phase 1.8.
+- **Silent `--framework-recon` no-op**: as a consequence of the ordering bug, `--framework-recon` would silently do nothing on production Laravel targets despite being explicitly enabled by the user. Fixed by the pipeline reorder above.
+- **Laravel body pattern never matched real Laravel output**: YAML double-escaping (`"Illuminate\\\\"`) parsed to a Python string requiring two literal backslashes, but real Laravel error pages render `Illuminate\Routing` with single backslashes. Patterns corrected to `"Illuminate\\Routing"` / `"Illuminate\\Foundation"` / `"Symfony\\Component\\HttpKernel"`.
+- **Bootstrap false-positive on Laravel error pages**: bare `bootstrap` substring matched Laravel's `/bootstrap/app.php` filename in stack traces. Bootstrap signature now requires CSS-framework-specific evidence (`bootstrap.min.css`, `navbar-toggler`, `container-fluid`, `data-bs-toggle`).
 - Three pre-existing E501 lint errors (long lines in `crawler.py`, `extractor.py`, `recon.py`) that were blocking the initial CI run.
+
+### Internal
+- **`labs/` directory with Docker-based test targets**. Real frameworks in known states, orchestrated via a single `docker compose` + `Makefile` so the deep-recon paths can be exercised end-to-end without an OSCP VPN.
+  - `labs/laravel/` — intentionally vulnerable Laravel 10 (PHP 8.4): `APP_DEBUG=true`, `/_ignition/*` reachable, `/.env` leaked to web root, `/trigger-error` route renders a full Ignition stack trace. End-to-end verified: framework_recon + debug_exposure + stack-trace mining all light up correctly.
+  - `labs/rails/` — plain Rails 7 install for the false-positive regression check (the Rails signature tightening must still detect real Rails).
+  - `labs/wordpress/` — official `wordpress:6` image + MariaDB 10.11 sidecar, fresh install. Exercises CMS path probing + 404-baseline filter on a real-world catch-all-style server.
+  - `labs/Makefile` — `make up / down / scan-laravel / scan-laravel-recon / scan-rails / scan-wordpress / scan-all`.
+  - All three on adjacent ports (8081/8082/8083) to avoid the common 80xx range.
 
 ---
 
