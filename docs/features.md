@@ -130,8 +130,46 @@ Passive identification only — no attacks:
 - **HTTP Auth**: Basic, Digest, NTLM, Kerberos/Negotiate, Bearer
 - **Login forms**: Password field detection with CSRF token check
 - **Session cookies**: Name pattern matching with flag analysis (HttpOnly, Secure, SameSite)
-- **Security headers**: CSP, HSTS, X-Content-Type-Options, X-XSS-Protection, Permissions-Policy
-- **Clickjacking protection**: X-Frame-Options
+
+Security headers (CSP, HSTS, X-Content-Type-Options, X-XSS-Protection, Permissions-Policy,
+X-Frame-Options, Referrer-Policy, COOP/COEP/CORP) are reported **separately** from auth
+mechanisms — they're defensive posture, not how users authenticate.
+
+---
+
+## Authenticated Crawling
+
+Crawl behind a login. shatterpoint sends credentials on **same-origin requests only** and
+**strips them on cross-origin redirects**, so a token or cookie can't leak to a third party.
+All credential values are **redacted** in the banner (`first4…last4`, auth scheme preserved)
+and are **never written to the saved JSON report**.
+
+### `--token` — bearer token
+- Sent as `Authorization: Bearer <token>`.
+- Resolution order: `--token` flag > `$SHATTERPOINT_TOKEN` env var > `config.yaml` `auth.token`.
+- JWT-aware: decodes the `exp` claim and warns when the token is expired or expiring soon.
+
+### `-H` / `--header` — arbitrary headers (covers all auth types)
+Repeatable raw `"Name: value"` header. One mechanism for every scheme:
+
+| Auth type | Example |
+|---|---|
+| Bearer / OAuth / JWT | `-H "Authorization: Bearer $JWT"` (or `--token`) |
+| HTTP Basic | `-H "Authorization: Basic <base64(user:pass)>"` |
+| Digest / NTLM / Negotiate | `-H "Authorization: <scheme> <creds>"` |
+| API key | `-H "X-API-Key: ..."` |
+| Cookie session | `-H "Cookie: session=..."` |
+| Multi-header (tenant, CSRF, …) | repeat `-H` |
+
+- Precedence: `-H` (CLI) > `config.yaml` `auth.headers`. An explicit `-H "Authorization: ..."`
+  overrides the `--token` convenience.
+- `-H` headers are origin-scoped exactly like the bearer token — httpx auto-strips
+  `Authorization` on cross-origin redirects, and shatterpoint adds a request hook + per-hop
+  spider check so custom headers (`X-API-Key`, `Cookie`, …) are stripped the same way.
+- Malformed `-H` (no colon / empty name) is warned about and skipped.
+
+All auth material flows to every authenticated request: recon, fingerprinting,
+framework-recon, SPA mining, and the crawl spider.
 
 ---
 
