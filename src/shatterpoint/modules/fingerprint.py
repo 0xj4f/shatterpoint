@@ -185,8 +185,12 @@ class Fingerprinter:
             if result.error or not result.headers:
                 continue
 
-            # Parse cookies from headers
-            cookies = self._extract_cookies(result.headers)
+            # Parse cookies — prefer the per-cookie list on CrawlResult
+            # when present so we see all Set-Cookie values, not just the
+            # first/last after dict-collapse.
+            cookies = self._extract_cookies(
+                result.headers, getattr(result, "set_cookies", None),
+            )
 
             detections = self.fingerprint_from_response(
                 url,
@@ -331,13 +335,16 @@ class Fingerprinter:
 
         # Check form field names. Many frameworks have characteristic
         # hidden input names (Laravel _token, Django csrfmiddlewaretoken,
-        # Rails authenticity_token, Spring _csrf). The match is on the
-        # input's `name` attribute regardless of input type.
+        # Rails authenticity_token, Spring _csrf). The match REQUIRES
+        # type="hidden" — a visible <input name="_token"> on an unrelated
+        # app would otherwise produce a false-positive Laravel detection.
         form_fields = sig.get("form_fields", [])
         if form_fields and forms:
             wanted = {f.lower() for f in form_fields if isinstance(f, str)}
             for form in forms:
                 for inp in form.get("inputs", []):
+                    if (inp.get("type") or "").lower() != "hidden":
+                        continue
                     name = (inp.get("name") or "").lower()
                     if name and name in wanted:
                         matched_on.append({
@@ -448,15 +455,29 @@ class Fingerprinter:
 
         return None
 
-    def _extract_cookies(self, headers: dict) -> dict:
-        """Extract cookie names from Set-Cookie headers."""
+    def _extract_cookies(
+        self, headers: dict, set_cookies: list[str] | None = None
+    ) -> dict:
+        """Extract cookie names from Set-Cookie headers.
+
+        `set_cookies` is the per-cookie list (one entry per Set-Cookie
+        response header). When provided we use it directly — this is
+        the only way to see all cookies when the server sent more than
+        one (httpx Headers cast to dict() collapses duplicates).
+        """
         cookies = {}
-        for key, value in headers.items():
-            if key.lower() == "set-cookie":
-                # Parse cookie name
-                parts = value.split(";")
-                if parts:
-                    name_val = parts[0].split("=", 1)
-                    if name_val:
-                        cookies[name_val[0].strip()] = name_val[1].strip() if len(name_val) > 1 else ""
+        if set_cookies:
+            cookie_values = list(set_cookies)
+        else:
+            cookie_values = [
+                v for k, v in headers.items() if k.lower() == "set-cookie"
+            ]
+        for value in cookie_values:
+            parts = value.split(";")
+            if parts:
+                name_val = parts[0].split("=", 1)
+                if name_val:
+                    cookies[name_val[0].strip()] = (
+                        name_val[1].strip() if len(name_val) > 1 else ""
+                    )
         return cookies

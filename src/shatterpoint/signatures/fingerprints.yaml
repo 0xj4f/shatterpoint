@@ -38,12 +38,15 @@ drupal:
       pattern: "(?i)drupal"
     - header: "x-drupal-cache"
       pattern: ".*"
+  # Drupal-specific paths only. /user/login and /admin/content were
+  # removed — they're not Drupal-unique (Django's admin redirects
+  # /admin/content → 302, producing a Drupal false-positive on Django
+  # targets). The remaining paths exist only in a real Drupal install.
   paths:
     - "/core/misc/drupal.js"
     - "/sites/default/"
     - "/core/CHANGELOG.txt"
-    - "/user/login"
-    - "/admin/content"
+    - "/core/install.php"
   meta:
     - name: "generator"
       pattern: "(?i)drupal\\s*([\\d.]+)?"
@@ -129,6 +132,23 @@ tomcat:
   body:
     - "Apache Tomcat"
 
+springboot:
+  name: "Spring Boot"
+  category: "Framework"
+  # X-Application-Context is a Spring-Boot-specific header (older 1.x/2.x).
+  # The Whitelabel Error Page + org.springframework body markers are
+  # distinctive. /actuator/health returning {"status":"UP"} is the classic
+  # Spring Boot tell. Each signal is Spring-specific (no bare PHP/server
+  # banners that would false-positive on unrelated apps).
+  headers:
+    - header: "x-application-context"
+      pattern: "."
+  body:
+    - "Whitelabel Error Page"
+    - "org.springframework"
+  paths:
+    - "/actuator/health"
+
 flask:
   name: "Flask"
   category: "Framework"
@@ -192,9 +212,11 @@ laravel:
   cookies:
     - "laravel_session"
     - "XSRF-TOKEN"
-  headers:
-    - header: "x-powered-by"
-      pattern: "(?i)PHP"
+  # Note: no `headers:` block here. `x-powered-by: PHP` was tempting
+  # as a "weak combine" signal but it's emitted by ALL PHP apps —
+  # WordPress, Drupal, Joomla, phpMyAdmin etc — so it's a guaranteed
+  # false-positive when used alone. PHP detection lives in its own
+  # signature; Laravel's evidence comes from cookies/body/forms/paths.
   body:
     - "laravel"
     # YAML escape note: "\\" in a double-quoted YAML string is ONE backslash
@@ -215,6 +237,40 @@ laravel:
     - "rails"
     - "django"
     - "symfony"
+
+# Voyager — a Laravel admin-panel PACKAGE (thecontrolgroup/devdojo).
+# Detected as its own product (not lumped under Laravel) so its CVEs
+# only fire when Voyager is actually present, never on a plain Laravel
+# site. Runs ON Laravel, so NOT incompatible_with laravel.
+voyager:
+  name: "Voyager (Laravel Admin)"
+  category: "Laravel Package"
+  # Body markers only — they're Voyager-unique and can't false-positive.
+  # We deliberately do NOT list /admin/compass as a fingerprint path:
+  # the fingerprinter follows redirects, so a framework whose /admin/*
+  # 302s to a login (Django, etc.) would land on a 200 and falsely match.
+  # /admin/compass is probed in the framework_recon Voyager profile
+  # instead, where it's content-gated AND only runs after this body
+  # fingerprint has already confirmed Voyager.
+  body:
+    - "voyager-assets"
+    - "thecontrolgroup/voyager"
+    - "devdojo/voyager"
+    - "voyager.js"
+
+# Innoshop — a Laravel-based e-commerce application. Detected by its
+# brand markers; its CVE is authenticated (admin File Manager) so the
+# signal is "product present", mapped to the CVE as a manual pointer.
+innoshop:
+  name: "Innoshop"
+  category: "Laravel App"
+  body:
+    - "Powered by Innoshop"
+    - "innoshop"
+    - "Innoshop"
+  meta:
+    - name: "generator"
+      pattern: "(?i)innoshop\\s*([\\d.]+)?"
 
 aspnet:
   name: "ASP.NET"

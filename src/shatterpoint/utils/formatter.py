@@ -188,6 +188,7 @@ def print_summary(results: dict):
             table.add_column("Sev", style="bold")
             table.add_column("Status")
             table.add_column("Path", style="white")
+            table.add_column("CVE", style="bold red")
             table.add_column("Note", style="dim")
             # Sort by severity (critical first)
             sev_rank = {"critical": 0, "high": 1, "medium": 2, "info": 3}
@@ -197,9 +198,22 @@ def print_summary(results: dict):
                     f"[{color}]{p.get('severity', '?').upper()}[/{color}]",
                     str(p.get("status_code", "")),
                     p.get("path", ""),
+                    p.get("cve") or "",
                     p.get("note", "")[:80],
                 )
             console.print(table)
+
+        # Manual-test pointers — CVEs we deliberately don't auto-probe
+        # (they need a payload). Surfaced so the operator knows what to
+        # test by hand.
+        manual = fr.get("manual_pointers", {})
+        if manual:
+            tree = Tree("[bold yellow]Manual-test pointers (need a payload — not auto-probed)[/bold yellow]")
+            for fw, pointers in manual.items():
+                branch = tree.add(f"[cyan]{fw.title()}[/cyan]")
+                for pointer in pointers:
+                    branch.add(pointer)
+            console.print(tree)
     elif fr.get("detected_frameworks"):
         # Hint shown to operator when supported framework detected but
         # mining wasn't enabled (also printed live during the scan).

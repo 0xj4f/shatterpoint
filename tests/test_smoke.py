@@ -493,6 +493,174 @@ def test_dedup_technologies_empty():
     assert dedup_technologies([]) == []
 
 
+# ─── Wave A regression tests ──────────────────────────────────────────
+
+
+def test_laravel_does_not_fire_on_bare_php_powered_by():
+    """Regression: my earlier Laravel sig had
+        headers:
+          - header: "x-powered-by"
+            pattern: "(?i)PHP"
+    which matched every PHP site (WordPress, Drupal, phpMyAdmin, …).
+    Confirmed false-positive on the WordPress lab. The Laravel sig
+    must require Laravel-specific evidence — cookies/body/forms — not
+    a bare PHP banner."""
+    fp = Fingerprinter({
+        "fingerprint": {
+            "check_headers": True, "check_cookies": True,
+            "check_meta": True, "check_scripts": True,
+        }
+    })
+    # A WordPress-like response: PHP banner + WordPress body + no
+    # Laravel-specific signals.
+    detections = fp.fingerprint_from_response(
+        "http://wp.test/",
+        {"x-powered-by": "PHP/8.3.31"},
+        "<html><body>Welcome to WordPress</body></html>",
+        cookies=None,
+    )
+    names = {d["name"] for d in detections}
+    assert "Laravel" not in names, (
+        "Laravel must not fire on bare PHP/X.Y.Z X-Powered-By — that's "
+        "emitted by every PHP framework"
+    )
+    # Sanity: PHP itself should still be detected
+    assert "PHP" in names
+
+
+def test_detect_auth_mechanisms_handles_multiple_set_cookies():
+    """Regression (Wave A A2): when a server sends multiple Set-Cookie
+    headers (Laravel apps send XSRF-TOKEN + laravel_session), the old
+    code iterated `headers.items()` and only saw the first/last after
+    dict() collapsed duplicates. Now we pass the per-cookie list."""
+    recon = ReconModule({}, "http://target.test")
+
+    # Two separate Set-Cookie response headers
+    set_cookies = [
+        "XSRF-TOKEN=abc123; HttpOnly; SameSite=Lax",
+        "laravel_session=def456; HttpOnly; Secure",
+    ]
+    auth = recon.detect_auth_mechanisms(
+        url="http://target.test/",
+        headers={},
+        body="",
+        forms=[],
+        set_cookies=set_cookies,
+    )
+    cookie_findings = [a for a in auth if a["type"] == "Session Cookie"]
+    cookie_names = {a["detail"].split("Cookie: ")[1].split(" ")[0] for a in cookie_findings}
+    assert "XSRF-TOKEN" in cookie_names, "XSRF-TOKEN session cookie should be detected"
+    assert "laravel_session" in cookie_names, "laravel_session should also be detected"
+
+
+def test_extract_cookies_handles_multiple_set_cookies():
+    """Companion to the auth test — fingerprint.py's _extract_cookies
+    must also see all Set-Cookie values when given the list."""
+    fp = Fingerprinter({"fingerprint": {}})
+    cookies = fp._extract_cookies(
+        headers={},
+        set_cookies=[
+            "XSRF-TOKEN=abc; HttpOnly",
+            "laravel_session=def; HttpOnly",
+        ],
+    )
+    assert "XSRF-TOKEN" in cookies
+    assert "laravel_session" in cookies
+
+
+def test_load_config_valid_yaml(tmp_path):
+    """Regression (Wave A A1): valid YAML loads as a dict."""
+    from shatterpoint.crawler import load_config
+
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("target:\n  url: http://x.test\ncrawler:\n  max_depth: 5\n")
+    result = load_config(str(cfg))
+    assert result["target"]["url"] == "http://x.test"
+    assert result["crawler"]["max_depth"] == 5
+
+
+def test_load_config_malformed_yaml_exits(tmp_path, capsys):
+    """Regression (Wave A A1): malformed YAML must exit loudly (non-zero),
+    not silently fall back to {} as the original code did."""
+    import pytest
+
+    from shatterpoint.crawler import load_config
+
+    cfg = tmp_path / "bad.yaml"
+    cfg.write_text("target:\n  url: http://x.test\n  : invalid : yaml :\n")
+    with pytest.raises(SystemExit) as exc:
+        load_config(str(cfg))
+    assert exc.value.code == 2
+    captured = capsys.readouterr()
+    assert "YAML syntax errors" in captured.out
+
+
+def test_load_config_explicit_missing_file_exits(tmp_path, capsys):
+    """Regression (Wave A A1): an explicit -c path pointing at a missing
+    file must exit loudly rather than silently using defaults."""
+    import pytest
+
+    from shatterpoint.crawler import load_config
+
+    with pytest.raises(SystemExit) as exc:
+        load_config(str(tmp_path / "does-not-exist.yaml"))
+    assert exc.value.code == 2
+    captured = capsys.readouterr()
+    assert "config file not found" in captured.out
+
+
+def test_load_config_default_missing_is_silent(tmp_path, monkeypatch):
+    """No -c passed AND no config.yaml in CWD must be silent (running
+    without a config is a valid mode)."""
+    from shatterpoint.crawler import load_config
+
+    monkeypatch.chdir(tmp_path)  # tmp_path has no config.yaml
+    result = load_config(None)
+    assert result == {}
+
+
+def test_parse_robots_extracts_full_sitemap_url():
+    """Regression (Wave A A4): parse_robots used to split lines on `:`
+    and mangle `Sitemap: https://example.com/x.xml` into
+    `//example.com/x.xml` (lost the scheme). Fix splits on the
+    `Sitemap:` prefix only."""
+    import asyncio
+
+    import httpx
+
+    robots_body = (
+        "User-agent: *\n"
+        "Disallow: /admin/\n"
+        "Sitemap: https://example.com/sitemap.xml\n"
+        "Sitemap: https://example.com/news-sitemap.xml\n"
+        "Sitemap:/relative-sitemap.xml\n"  # no space — edge case
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/plain"},
+            text=robots_body,
+        )
+
+    async def run() -> dict:
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(transport=transport) as client:
+            recon = ReconModule({}, "http://example.com")
+            return await recon.parse_robots(client)
+
+    result = asyncio.run(run())
+    assert result["found"] is True
+    assert "/admin/" in result["disallowed"]
+    # Full URLs preserved
+    assert "https://example.com/sitemap.xml" in result["sitemaps"]
+    assert "https://example.com/news-sitemap.xml" in result["sitemaps"]
+    # Edge case: no space after "Sitemap:" still works
+    assert "/relative-sitemap.xml" in result["sitemaps"]
+    # No mangled URLs
+    assert not any(s.startswith("//") for s in result["sitemaps"])
+
+
 # ─── Audit regressions (catch the bugs the confidence audit found) ───
 
 
@@ -593,6 +761,362 @@ def test_bootstrap_still_fires_on_real_bootstrap_site():
     assert "Bootstrap" in names
 
 
+# ─── Framework CVE signal-recon (precision guards) ────────────────────
+
+
+def _run_probe_sync(probe, status, body, headers=None):
+    """Drive FrameworkRecon._run_probe against a mocked response."""
+    import asyncio
+
+    import httpx
+
+    from shatterpoint.modules.framework_recon import FrameworkRecon
+    from shatterpoint.utils.baseline import Baseline
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, text=body, headers=headers or {})
+
+    async def go():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            fr = FrameworkRecon({"framework_recon": {"enabled": True}}, URLValidator("http://t.test"))
+            # available=False → baseline never matches, so we isolate the
+            # confirm_any / escalation logic under test.
+            baseline = Baseline(available=False, status_code=0, body_hash="", body_length=0)
+            return await fr._run_probe(client, "http://t.test", probe, baseline)
+
+    return asyncio.run(go())
+
+
+def test_framework_probes_are_passive_get_only():
+    """Passivity guard: the Probe dataclass must not carry any field that
+    could turn a probe into an exploit (HTTP method override, request
+    body, payload). This is the machine-enforced 'we don't exploit'."""
+    import dataclasses
+
+    from shatterpoint.modules.framework_recon import Probe
+
+    fields = {f.name for f in dataclasses.fields(Probe)}
+    forbidden = {"method", "data", "payload", "json", "body", "headers", "params"}
+    leaked = fields & forbidden
+    assert not leaked, f"Probe must stay GET-only signal-checks; forbidden fields present: {leaked}"
+
+
+def test_framework_probes_use_only_get_at_runtime():
+    """Runtime passivity guard: running every profile against a mock
+    server must issue GET requests only — never POST/PUT/etc."""
+    import asyncio
+
+    import httpx
+
+    from shatterpoint.modules.framework_recon import _PROFILES, FrameworkRecon
+
+    methods_seen = set()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        methods_seen.add(request.method)
+        return httpx.Response(404, text="not found")
+
+    async def go():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            fr = FrameworkRecon({"framework_recon": {"enabled": True}}, URLValidator("http://t.test"))
+            techs = [{"id": fid} for fid in _PROFILES]
+            await fr.analyze(client, "http://t.test", techs)
+
+    asyncio.run(go())
+    assert methods_seen == {"GET"}, f"framework recon must be GET-only, saw: {methods_seen}"
+
+
+def test_framework_probe_cve_format():
+    """Every CVE reference across all profiles must be a well-formed CVE ID."""
+    import re
+
+    from shatterpoint.modules.framework_recon import _PROFILES
+
+    cve_re = re.compile(r"^CVE-\d{4}-\d{4,}$")
+    for fid, probes in _PROFILES.items():
+        for probe in probes:
+            for cve in (probe.cve, probe.escalate_cve):
+                if cve is not None:
+                    assert cve_re.match(cve), f"{fid} probe {probe.path} has malformed CVE: {cve}"
+
+
+def test_confirm_any_gate_drops_200_without_marker():
+    """Precision: a 200 lacking every confirm_any marker is NOT the
+    framework resource and must be dropped (no false positive)."""
+    from shatterpoint.modules.framework_recon import Probe
+
+    probe = Probe("/console", "critical", "Werkzeug debugger",
+                  cve="CVE-2024-34069", confirm_any=("werkzeug", "__debugger__"))
+    # Generic 200 with no Werkzeug marker → dropped
+    assert _run_probe_sync(probe, 200, "<html>generic app page</html>") is None
+
+
+def test_confirm_any_gate_keeps_200_with_marker():
+    from shatterpoint.modules.framework_recon import Probe
+
+    probe = Probe("/console", "critical", "Werkzeug debugger",
+                  cve="CVE-2024-34069", confirm_any=("werkzeug", "__debugger__"))
+    result = _run_probe_sync(probe, 200, "<title>Werkzeug Debugger</title>")
+    assert result is not None
+    assert result.status_code == 200
+    assert result.cve == "CVE-2024-34069"
+
+
+def test_confirm_any_bypassed_on_non_200_signal_code():
+    """A 403/401 means the route exists but is protected — that's still a
+    signal, so the content gate is bypassed for non-200 codes."""
+    from shatterpoint.modules.framework_recon import Probe
+
+    probe = Probe("/console", "critical", "Werkzeug debugger",
+                  confirm_any=("werkzeug",))
+    result = _run_probe_sync(probe, 403, "")
+    assert result is not None
+    assert result.status_code == 403
+
+
+def test_env_escalates_to_cve_when_app_key_present():
+    """The .env probe escalates to CVE-2018-15133 only when APP_KEY is in
+    the body — a reachable .env without it stays a plain critical."""
+    from shatterpoint.modules.framework_recon import Probe
+
+    env_probe = Probe(
+        "/.env", "critical", "Laravel env file",
+        escalate_any=("app_key=base64:", "app_key="),
+        escalate_cve="CVE-2018-15133", escalate_note="env with APP_KEY",
+    )
+    # With APP_KEY → escalated
+    leaked = _run_probe_sync(env_probe, 200, "APP_NAME=demo\nAPP_KEY=base64:abc123==\nDB_PASS=x")
+    assert leaked is not None
+    assert leaked.cve == "CVE-2018-15133"
+    assert leaked.note == "env with APP_KEY"
+    # Without APP_KEY → base finding, no CVE
+    plain = _run_probe_sync(env_probe, 200, "APP_NAME=demo\nDB_HOST=localhost")
+    assert plain is not None
+    assert plain.cve is None
+
+
+def test_springboot_profile_covers_critical_endpoints():
+    from shatterpoint.modules.framework_recon import _PROFILES
+
+    paths = {p.path for p in _PROFILES["springboot"]}
+    for must in ("/actuator/heapdump", "/actuator/gateway/routes", "/actuator/env"):
+        assert must in paths, f"Spring Boot profile missing {must}"
+    # Gateway routes must carry the SpEL RCE CVE
+    gw = next(p for p in _PROFILES["springboot"] if p.path == "/actuator/gateway/routes")
+    assert gw.cve == "CVE-2022-22947"
+
+
+def test_framework_recon_springboot_actuator_end_to_end():
+    """Integration (substitutes for the heavy Spring Boot lab): drive the
+    full analyze() flow against a simulated actuator target and assert the
+    high-value findings + CVE mapping fire, gated by content confirmation."""
+    import asyncio
+
+    import httpx
+
+    from shatterpoint.modules.framework_recon import FrameworkRecon
+
+    responses = {
+        "/actuator": (200, '{"_links":{"self":{"href":"http://t/actuator"}}}'),
+        "/actuator/heapdump": (200, "JAVA PROFILE 1.0.2\x00binaryheapdumpdata"),
+        "/actuator/gateway/routes": (200, '[{"route_id":"r1","predicate":"Paths","uri":"lb://svc","filters":[]}]'),
+        "/actuator/env": (200, '{"activeProfiles":["prod"],"propertySources":[{"name":"systemProperties"}]}'),
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        s_b = responses.get(request.url.path)
+        if s_b:
+            return httpx.Response(s_b[0], text=s_b[1])
+        return httpx.Response(404, text="<html>Whitelabel Error Page</html>")
+
+    async def go():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            fr = FrameworkRecon({"framework_recon": {"enabled": True}}, URLValidator("http://t.test"))
+            return await fr.analyze(client, "http://t.test", [{"id": "springboot"}])
+
+    result = asyncio.run(go())
+    by_path = {p["path"]: p for p in result["probes"]}
+    assert "/actuator/gateway/routes" in by_path
+    assert by_path["/actuator/gateway/routes"]["cve"] == "CVE-2022-22947"
+    assert by_path["/actuator/gateway/routes"]["severity"] == "critical"
+    assert "/actuator/heapdump" in by_path           # JAVA PROFILE magic confirmed
+    assert "/actuator/env" in by_path                # propertySources confirmed
+    assert result["manual_pointers"].get("springboot")  # Spring4Shell/Log4Shell guidance
+
+
+def test_framework_recon_springboot_no_false_positive_on_catchall():
+    """Precision: a catch-all server that 200s everything with the SAME
+    body must NOT produce actuator findings (baseline + confirm_any)."""
+    import asyncio
+
+    import httpx
+
+    from shatterpoint.modules.framework_recon import FrameworkRecon
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        # Every path returns an identical generic SPA shell
+        return httpx.Response(200, text="<html><body><div id=root></div></body></html>")
+
+    async def go():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            fr = FrameworkRecon({"framework_recon": {"enabled": True}}, URLValidator("http://t.test"))
+            return await fr.analyze(client, "http://t.test", [{"id": "springboot"}])
+
+    result = asyncio.run(go())
+    # No actuator JSON markers present anywhere → zero probe findings
+    assert result["probes"] == [], f"catch-all should yield no findings, got {result['probes']}"
+
+
+def test_manual_pointers_present_for_each_framework():
+    """The non-recon-detectable CVEs (Spring4Shell, Log4Shell, SSTI, etc.)
+    must be surfaced as manual-test guidance, not silently dropped."""
+    from shatterpoint.modules.framework_recon import _MANUAL_POINTERS, _PROFILES
+
+    for fid in _PROFILES:
+        assert fid in _MANUAL_POINTERS, f"{fid} has no manual-test pointers"
+    # Spring4Shell + Log4Shell must be named (they're famous, exam-relevant)
+    spring_text = " ".join(_MANUAL_POINTERS["springboot"])
+    assert "CVE-2022-22965" in spring_text  # Spring4Shell
+    assert "CVE-2021-44228" in spring_text  # Log4Shell
+
+
+# ─── Voyager / Innoshop product CVE detection ─────────────────────────
+
+
+def test_voyager_fingerprint_matches_voyager_admin():
+    """Voyager admin page (voyager-assets / thecontrolgroup markers) → detected."""
+    fp = Fingerprinter({
+        "fingerprint": {
+            "check_headers": True, "check_cookies": True,
+            "check_meta": True, "check_scripts": True,
+        }
+    })
+    body = (
+        '<html><head><link href="/voyager-assets/css/app.css">'
+        '<script src="/voyager-assets/js/voyager.js"></script></head>'
+        '<body>thecontrolgroup/voyager admin</body></html>'
+    )
+    detections = fp.fingerprint_from_response("http://t/admin/login", {}, body, cookies=None)
+    names = {d["name"] for d in detections}
+    assert "Voyager (Laravel Admin)" in names
+
+
+def test_voyager_profile_maps_cves():
+    from shatterpoint.modules.framework_recon import _PROFILES
+
+    by_path = {p.path: p for p in _PROFILES["voyager"]}
+    assert by_path["/admin/compass"].cve == "CVE-2024-55415"
+    assert by_path["/admin/media"].cve == "CVE-2024-55417"
+    assert by_path["/admin/media"].severity == "critical"
+
+
+def test_voyager_fingerprint_has_no_generic_admin_paths():
+    """Precision regression: the Voyager FINGERPRINT must not carry
+    /admin/* paths. The fingerprinter follows redirects, so a framework
+    whose /admin/* 302s to a 200 login (Django, etc.) would falsely
+    match Voyager. /admin/compass lives in the framework_recon profile
+    (content-gated) instead."""
+    from pathlib import Path as _P
+
+    import yaml
+
+    sig_path = _P("src/shatterpoint/signatures/fingerprints.yaml")
+    sigs = yaml.safe_load(sig_path.read_text())
+    voyager_paths = sigs.get("voyager", {}).get("paths", [])
+    assert voyager_paths == [], (
+        f"Voyager fingerprint must rely on body markers, not /admin paths; got {voyager_paths}"
+    )
+
+
+def test_innoshop_fingerprint_and_cve_pointer():
+    fp = Fingerprinter({
+        "fingerprint": {
+            "check_headers": True, "check_cookies": True,
+            "check_meta": True, "check_scripts": True,
+        }
+    })
+    body = '<html><body><footer>Powered by Innoshop</footer></body></html>'
+    detections = fp.fingerprint_from_response("http://t/", {}, body, cookies=None)
+    assert "Innoshop" in {d["name"] for d in detections}
+
+    from shatterpoint.modules.framework_recon import _MANUAL_POINTERS
+    assert any("CVE-2025-52921" in p for p in _MANUAL_POINTERS["innoshop"])
+
+
+def test_voyager_innoshop_do_not_fire_on_plain_laravel():
+    """PRECISION: a plain Laravel page (no Voyager/Innoshop markers) must
+    NOT be fingerprinted as Voyager or Innoshop — these CVEs only apply
+    when the specific product is present."""
+    fp = Fingerprinter({
+        "fingerprint": {
+            "check_headers": True, "check_cookies": True,
+            "check_meta": True, "check_scripts": True,
+        }
+    })
+    body = (
+        '<html><body>laravel app, Illuminate\\Routing in a stack trace, '
+        '/vendor/laravel/framework/ path</body></html>'
+    )
+    detections = fp.fingerprint_from_response(
+        "http://t/", {"set-cookie": "laravel_session=x"}, body, cookies={"laravel_session": "x"},
+    )
+    names = {d["name"] for d in detections}
+    assert "Laravel" in names
+    assert "Voyager (Laravel Admin)" not in names
+    assert "Innoshop" not in names
+
+
+def test_voyager_runtime_probe_fires_on_compass():
+    """End-to-end: a Voyager target (compass returns Voyager content) →
+    CVE-2024-55415 finding; the catch-all/no-marker case is dropped."""
+    from shatterpoint.modules.framework_recon import _PROFILES
+
+    compass = next(p for p in _PROFILES["voyager"] if p.path == "/admin/compass")
+    hit = _run_probe_sync(compass, 200, "<html>Voyager Compass dashboard</html>")
+    assert hit is not None and hit.cve == "CVE-2024-55415"
+    # Generic 200 without Voyager markers → gated out (no false positive)
+    assert _run_probe_sync(compass, 200, "<html>unrelated 200 page</html>") is None
+
+
+# ─── Multi-framework debug detection (stacktrace) ─────────────────────
+
+
+def test_stacktrace_detects_django_debug_page():
+    body = (
+        "<h1>ValueError at /boom/</h1>"
+        "<table><tr><th>Django Version:</th><td>4.2.11</td></tr></table>"
+        "<p>You're seeing this error because you have <code>DEBUG = True</code></p>"
+        "Traceback (most recent call last): django.core.handlers.exception"
+    )
+    fw, version = st_detect_framework(body)
+    assert fw == "Django"
+    assert version == "4.2.11"
+
+
+def test_stacktrace_detects_flask_werkzeug_debugger():
+    body = '<title>Werkzeug Debugger</title><script src="?__debugger__=yes">Werkzeug/3.0.1</script>'
+    fw, version = st_detect_framework(body)
+    assert fw == "Flask"
+    assert version == "3.0.1"
+
+
+def test_stacktrace_detects_springboot_whitelabel():
+    body = (
+        "<h1>Whitelabel Error Page</h1><p>There was an unexpected error</p>"
+        "at org.springframework.web.servlet.DispatcherServlet"
+    )
+    fw, version = st_detect_framework(body)
+    assert fw == "Spring Boot"
+    assert version is None
+
+
+def test_stacktrace_framework_clean_page_no_false_positive():
+    # A normal page mentioning "debug" loosely must NOT be attributed
+    body = "<html><body>Welcome. Toggle debug mode in settings.</body></html>"
+    fw, version = st_detect_framework(body)
+    assert fw is None
+
+
 # ─── FrameworkRecon module ────────────────────────────────────────────
 
 
@@ -646,15 +1170,6 @@ def test_framework_recon_laravel_profile_has_critical_probes():
     }
     missing = must_have - paths
     assert not missing, f"Laravel profile missing critical probes: {missing}"
-
-
-def test_framework_recon_no_cve_numbers_in_notes():
-    """Per project direction: no CVE numbers surface in the output."""
-    from shatterpoint.modules.framework_recon import _LARAVEL_PROBES
-    for probe in _LARAVEL_PROBES:
-        assert "CVE-" not in probe.note, (
-            f"Probe {probe.path} leaks CVE number: {probe.note}"
-        )
 
 
 # ─── Signature tightening regression tests ───────────────────────────
@@ -916,6 +1431,50 @@ def test_fingerprint_form_field_no_match():
     )
     names = {d["name"] for d in detections}
     assert "TestOnlyLaravel" not in names
+
+
+def test_fingerprint_form_field_requires_hidden_type():
+    """Regression (Wave A audit A3): visible <input name="_token"> on an
+    unrelated app must NOT fire a Laravel-style form_fields detection.
+    Only type=hidden inputs count as CSRF-token evidence."""
+    fp = Fingerprinter({
+        "fingerprint": {
+            "check_headers": True, "check_cookies": True,
+            "check_meta": True, "check_scripts": True,
+        }
+    })
+    fp.signatures["__test_hidden_only"] = {
+        "name": "TestHiddenOnly",
+        "category": "Framework",
+        "form_fields": ["_token"],
+    }
+    # Visible text input named _token — should NOT match
+    forms_visible = [{
+        "found_on": "http://other.test/",
+        "inputs": [
+            {"tag": "input", "type": "text", "name": "_token", "value": ""},
+        ],
+    }]
+    detections = fp.fingerprint_from_response(
+        "http://other.test/", {}, "<html></html>", cookies=None, forms=forms_visible,
+    )
+    names = {d["name"] for d in detections}
+    assert "TestHiddenOnly" not in names, (
+        "form_fields must require type=hidden; visible inputs should not match"
+    )
+
+    # Hidden input — should match
+    forms_hidden = [{
+        "found_on": "http://target.test/",
+        "inputs": [
+            {"tag": "input", "type": "hidden", "name": "_token", "value": "abc"},
+        ],
+    }]
+    detections = fp.fingerprint_from_response(
+        "http://target.test/", {}, "<html></html>", cookies=None, forms=forms_hidden,
+    )
+    names = {d["name"] for d in detections}
+    assert "TestHiddenOnly" in names
 
 
 def test_fingerprint_form_field_without_forms_passed():

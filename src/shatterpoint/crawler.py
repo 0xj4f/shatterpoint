@@ -59,13 +59,36 @@ class _BannerArgumentParser(argparse.ArgumentParser):
         return f"{BANNER_TEXT}\n\n" + super().format_help()
 
 
-def load_config(config_path: str = "config.yaml") -> dict:
-    """Load configuration from YAML file."""
-    config_file = Path(config_path)
-    if config_file.exists():
+def load_config(config_path: str | None = None) -> dict:
+    """Load configuration from YAML file.
+
+    When `config_path` is None (user did not pass -c), we try the
+    default ``config.yaml`` silently — running without a config is a
+    valid mode.
+
+    When `config_path` is explicit, the file MUST exist and parse
+    cleanly; we exit non-zero on either failure rather than silently
+    falling back to defaults. The pre-fix behaviour was to silently
+    return `{}` on any failure, leaving operators unable to diagnose
+    why their config wasn't being honoured.
+    """
+    explicit = config_path is not None
+    path = config_path or "config.yaml"
+    config_file = Path(path)
+
+    if not config_file.exists():
+        if explicit:
+            console.print(f"[bold red]ERROR:[/bold red] config file not found: {path}")
+            sys.exit(2)
+        return {}
+
+    try:
         with open(config_file, "r") as f:
             return yaml.safe_load(f) or {}
-    return {}
+    except yaml.YAMLError as e:
+        console.print(f"[bold red]ERROR:[/bold red] config file '{path}' has YAML syntax errors:")
+        console.print(f"  {e}")
+        sys.exit(2)
 
 
 def parse_args() -> argparse.Namespace:
@@ -102,7 +125,10 @@ Environment:
         """,
     )
     parser.add_argument("-u", "--url", help="Target URL (overrides config)")
-    parser.add_argument("-c", "--config", default="config.yaml", help="Config file path")
+    parser.add_argument(
+        "-c", "--config", default=None,
+        help="Config file path (default: config.yaml if it exists; loud error if -c file is missing or malformed)",
+    )
     parser.add_argument("-d", "--depth", type=int, help="Max crawl depth")
     parser.add_argument("-p", "--pages", type=int, help="Max pages to crawl")
     parser.add_argument("-t", "--threads", type=int, help="Concurrency level")
@@ -397,7 +423,10 @@ async def run_crawler(config: dict) -> dict:
                 page_forms = [f for f in all_forms if f["found_on"] == url]
             else:
                 page_forms = html_parser.extract_forms(body, url)
-            auth = recon.detect_auth_mechanisms(url, headers, body, page_forms)
+            auth = recon.detect_auth_mechanisms(
+                url, headers, body, page_forms,
+                set_cookies=getattr(crawl_result, "set_cookies", None),
+            )
             all_auth.extend(auth)
             all_security_headers.extend(recon.detect_security_headers(url, headers))
 
@@ -433,7 +462,9 @@ async def run_crawler(config: dict) -> dict:
         results["debug_exposure"] = merge_findings(stacktrace_findings)
         st_framework = results["debug_exposure"].get("framework")
         if st_framework:
-            tech_id = st_framework.lower()
+            # Normalise to a fingerprint id: "Spring Boot" -> "springboot"
+            # so the synthesised entry merges with the springboot signature.
+            tech_id = st_framework.lower().replace(" ", "")
             existing_ids = {t.get("id") for t in results["technologies"]}
             if tech_id not in existing_ids:
                 results["technologies"].append({
@@ -585,7 +616,7 @@ def main():
         config["target"]["url"] = target_url
 
     print_status(f"Target: {target_url}")
-    print_status(f"Config: {args.config}")
+    print_status(f"Config: {args.config or 'config.yaml (default, optional)'}")
     if token:
         warning = warn_on_expiry(token)
         if warning:
