@@ -3,14 +3,13 @@ name: Release
 # Tag, build, and publish to Docker Hub on every merge to main.
 #
 # Versioning model:
-#   - GitHub Variables MAJOR_VERSION and MINOR_VERSION control the
-#     major/minor portion. Bump them via the GitHub UI when you want
-#     to ship a new minor/major line.
+#   - MAJOR_VERSION / MINOR_VERSION are hardcoded in the `env:` block
+#     below so the version line lives in the codebase and is reviewed
+#     via PR. Bump them and merge to ship a new minor/major line.
 #   - PATCH auto-increments. Computed as (highest existing
 #     v${MAJOR}.${MINOR}.* tag's PATCH) + 1, or 0 if none exists.
 #
 # Required GitHub setup (one-time, manual):
-#   - Repo Variables: MAJOR_VERSION, MINOR_VERSION (e.g. 0, 1)
 #   - Environment "Development" with secrets:
 #       DOCKER_USER, DOCKER_PASSWORD
 #   - Workflow permissions: contents:write (set below at job level)
@@ -23,6 +22,14 @@ on:
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
+
+# Version is hardcoded here (not GitHub repo Variables) so the major/minor
+# line is monitored in the codebase and reviewed via PR. PATCH auto-increments
+# from the highest existing vMAJOR.MINOR.* tag. To ship a new minor/major line,
+# bump these and merge.
+env:
+  MAJOR_VERSION: "1"
+  MINOR_VERSION: "0"
 
 jobs:
   release:
@@ -42,19 +49,11 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
-      - name: Validate version variables
-        run: |
-          if [ -z "${{ vars.MAJOR_VERSION }}" ] || [ -z "${{ vars.MINOR_VERSION }}" ]; then
-            echo "::error::MAJOR_VERSION and MINOR_VERSION repo variables must be set"
-            echo "::error::Go to Settings → Secrets and variables → Actions → Variables"
-            exit 1
-          fi
-
       - name: Compute next version
         id: version
         run: |
-          MAJOR="${{ vars.MAJOR_VERSION }}"
-          MINOR="${{ vars.MINOR_VERSION }}"
+          MAJOR="${{ env.MAJOR_VERSION }}"
+          MINOR="${{ env.MINOR_VERSION }}"
 
           # Find the highest existing PATCH for this MAJOR.MINOR line.
           # `sort -V` does proper semver-ish sorting.
