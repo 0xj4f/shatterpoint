@@ -8,6 +8,7 @@ from shatterpoint.modules.extractor import Extractor
 from shatterpoint.modules.fingerprint import (
     Fingerprinter,
     dedup_technologies,
+    finalize_technologies,
     resolve_conflicts,
 )
 from shatterpoint.modules.parser import HTMLParser
@@ -831,6 +832,56 @@ def test_framework_probes_use_only_get_at_runtime():
     assert methods_seen == {"GET"}, f"framework recon must be GET-only, saw: {methods_seen}"
 
 
+def test_shared_baseline_is_passed_through_not_refetched(monkeypatch):
+    """Wave A2: when the orchestrator threads a baseline in, the path-probe
+    modules must USE it and not fetch their own. We monkeypatch each
+    module's fetch_baseline to blow up, then confirm a call WITH baseline
+    completes — proving the redundant per-module fetch was skipped."""
+    import asyncio
+
+    import httpx
+
+    from shatterpoint.modules import fingerprint as fp_mod
+    from shatterpoint.modules import framework_recon as fr_mod
+    from shatterpoint.modules import recon as recon_mod
+    from shatterpoint.modules.fingerprint import Fingerprinter
+    from shatterpoint.modules.framework_recon import FrameworkRecon
+    from shatterpoint.modules.recon import ReconModule
+    from shatterpoint.utils.baseline import Baseline
+
+    async def _boom(*a, **k):
+        raise AssertionError("fetch_baseline must NOT run when a baseline is provided")
+
+    monkeypatch.setattr(fp_mod, "fetch_baseline", _boom)
+    monkeypatch.setattr(fr_mod, "fetch_baseline", _boom)
+    monkeypatch.setattr(recon_mod, "fetch_baseline", _boom)
+
+    shared = Baseline(available=True, status_code=404, body_hash="x", body_length=4)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, text="nope")
+
+    async def go():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            fr = FrameworkRecon(
+                {"framework_recon": {"enabled": True}}, URLValidator("http://t.test")
+            )
+            await fr.analyze(client, "http://t.test", [{"id": "laravel"}], baseline=shared)
+
+            fpr = Fingerprinter({"fingerprint": {}})
+            await fpr.probe_known_paths(client, "http://t.test", baseline=shared)
+
+            rc = ReconModule(
+                {"recon": {"common_paths": True, "robots_txt": False,
+                           "sitemap_xml": False, "security_txt": False,
+                           "auth_detection": False}},
+                "http://t.test",
+            )
+            await rc.run_all(client, baseline=shared)
+
+    asyncio.run(go())  # raises via _boom if any module re-fetched the baseline
+
+
 def test_framework_probe_cve_format():
     """Every CVE reference across all profiles must be a well-formed CVE ID."""
     import re
@@ -1503,6 +1554,36 @@ def test_resolve_conflicts_empty():
     assert resolve_conflicts([_tech("x", 1)], {}) == [_tech("x", 1)]
 
 
+def test_finalize_technologies_dedups_then_resolves():
+    # finalize_technologies must equal resolve_conflicts(dedup_technologies(x))
+    # — collapse the duplicate laravel entries first (so its merged evidence
+    # is strongest), THEN drop the conflicting weaker rails. Order matters:
+    # resolving before dedup would compare an un-merged laravel against rails.
+    sigs = {
+        "laravel": {"incompatible_with": ["rails"]},
+        "rails": {"incompatible_with": ["laravel"]},
+    }
+    techs = [
+        _tech("laravel", methods=2, confidence="medium"),
+        {  # second laravel hit via a different method → merges to 3 methods
+            "id": "laravel",
+            "name": "Laravel",
+            "matched_on": [{"method": "path_probe", "detail": "/_ignition"}],
+            "confidence": "medium",
+        },
+        _tech("rails", methods=2, confidence="medium"),
+    ]
+    result = finalize_technologies(techs, sigs)
+    ids = [t["id"] for t in result]
+    # laravel deduped to a single, stronger entry; rails dropped as weaker
+    assert ids == ["laravel"]
+    assert result == resolve_conflicts(dedup_technologies(techs), sigs)
+
+
+def test_finalize_technologies_empty():
+    assert finalize_technologies([], {}) == []
+
+
 # ─── form_fields signature channel ────────────────────────────────────
 
 
@@ -1695,7 +1776,7 @@ def test_auth_strip_hook_strips_custom_headers_cross_origin():
 
     import httpx
 
-    from shatterpoint.crawler import _make_auth_strip_hook
+    from shatterpoint.utils.auth import make_auth_strip_hook
 
     seen: dict[str, dict] = {}
 
@@ -1708,7 +1789,7 @@ def test_auth_strip_hook_strips_custom_headers_cross_origin():
             return httpx.Response(302, headers={"location": "http://evil.test/landing"})
         return httpx.Response(200, text="ok")
 
-    hook = _make_auth_strip_hook("http", "target.test", {"Authorization", "X-API-Key", "Cookie"})
+    hook = make_auth_strip_hook("http", "target.test", {"Authorization", "X-API-Key", "Cookie"})
 
     async def go():
         async with httpx.AsyncClient(

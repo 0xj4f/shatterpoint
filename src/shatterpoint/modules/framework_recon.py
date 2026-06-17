@@ -39,7 +39,7 @@ from typing import TYPE_CHECKING
 
 import httpx
 
-from shatterpoint.utils.baseline import fetch_baseline
+from shatterpoint.utils.baseline import Baseline, fetch_baseline
 from shatterpoint.utils.formatter import print_finding, print_status
 
 if TYPE_CHECKING:
@@ -356,6 +356,7 @@ class FrameworkRecon:
         client: httpx.AsyncClient,
         base_url: str,
         detected_techs: list[dict],
+        baseline: Baseline | None = None,
     ) -> dict:
         """Main entry point. Returns the `framework_recon` result block.
 
@@ -387,7 +388,8 @@ class FrameworkRecon:
         result["frameworks_probed"] = targets
         print_status(f"Framework recon: probing profiles → {', '.join(targets)}")
 
-        baseline = await fetch_baseline(client, base_url)
+        if baseline is None:
+            baseline = await fetch_baseline(client, base_url)
         if baseline.available:
             print_status(
                 f"Framework-recon baseline: status={baseline.status_code}, "

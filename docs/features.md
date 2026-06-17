@@ -2,6 +2,8 @@
 
 Complete feature reference for **shatterpoint**.
 
+> For *how* a scan flows end-to-end — the 9-phase pipeline, module call-graph, auth origin-scoping, and precision guards — see [ARCHITECTURE.md](ARCHITECTURE.md).
+
 ---
 
 ## Crawling Engine

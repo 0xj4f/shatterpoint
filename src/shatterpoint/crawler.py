@@ -21,8 +21,7 @@ from shatterpoint import __version__
 from shatterpoint.modules.extractor import Extractor
 from shatterpoint.modules.fingerprint import (
     Fingerprinter,
-    dedup_technologies,
-    resolve_conflicts,
+    finalize_technologies,
 )
 from shatterpoint.modules.framework_recon import FrameworkRecon
 from shatterpoint.modules.parser import HTMLParser
@@ -32,13 +31,14 @@ from shatterpoint.modules.spider import Spider
 from shatterpoint.utils.auth import (
     ENV_VAR,
     build_auth_headers,
+    make_auth_strip_hook,
     redact_headers,
     redact_token,
     resolve_headers,
     resolve_token,
-    should_send_auth,
     warn_on_expiry,
 )
+from shatterpoint.utils.baseline import fetch_baseline
 from shatterpoint.utils.formatter import (
     BANNER_TEXT,
     console,
@@ -191,126 +191,151 @@ Environment:
     return parser.parse_args()
 
 
-def _make_auth_strip_hook(scheme: str, netloc: str, auth_header_names: set[str]):
-    """Build an httpx request event hook that strips auth headers when a
-    request leaves the target origin (e.g. a cross-origin redirect that
-    httpx follows). httpx auto-strips `Authorization` cross-origin but NOT
-    custom headers (X-API-Key, Cookie, ...), so this covers every -H
-    header uniformly — matching the spider's per-hop origin scoping."""
-    lowered = {n.lower() for n in auth_header_names}
+class CrawlOrchestrator:
+    """Sequences the nine-phase recon pipeline.
 
-    async def _strip(request: "httpx.Request") -> None:
-        if not should_send_auth(scheme, netloc, str(request.url)):
-            for hname in list(request.headers.keys()):
-                if hname.lower() in lowered:
-                    del request.headers[hname]
+    State that flows between phases lives on the instance; each
+    ``_phaseN_*`` method reads and mutates it. :meth:`run` opens the shared
+    recon client and drives the phases in order. Behaviour is identical to
+    the previous inline ``run_crawler`` — this is a mechanical extraction
+    for readability, not a logic change.
+    """
 
-    return _strip
+    def __init__(self, config: dict):
+        self.config = config
+        self.target_url = config["target"]["url"]
+        self.start_time = time.time()
 
+        # Components
+        self.validator = URLValidator(self.target_url)
+        self.spider = Spider(config, self.validator)
+        self.html_parser = HTMLParser()
+        self.extractor = Extractor()
+        self.fingerprinter = Fingerprinter(config)
+        self.recon = ReconModule(config, self.validator.base_url)
+        self.spa_analyzer = SPAAnalyzer(config, self.validator, self.extractor, self.html_parser)
+        self.framework_recon = FrameworkRecon(config, self.validator)
 
-async def run_crawler(config: dict) -> dict:
-    """Main crawler orchestration logic."""
-    target_url = config["target"]["url"]
-    start_time = time.time()
+        # Results container
+        self.results = {
+            "target": {
+                "url": self.target_url,
+                "domain": self.validator.target_domain,
+                "base_url": self.validator.base_url,
+            },
+            "scan_start": time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime()),
+            "technologies": [],
+            "forms": [],
+            "api_endpoints": [],
+            "file_uploads": [],
+            "interesting_files": [],
+            "comments": [],
+            "emails": [],
+            "parameters": [],
+            "auth_mechanisms": [],
+            "security_headers": [],
+            "robots_txt": {},
+            "sitemap": {},
+            "security_txt": {},
+            "common_paths": [],
+            "all_urls": [],
+            "attack_surface": {},
+            "spa": {},
+            "framework_recon": {},
+            "debug_exposure": {},
+        }
 
-    # Initialize components
-    validator = URLValidator(target_url)
-    spider = Spider(config, validator)
-    html_parser = HTMLParser()
-    extractor = Extractor()
-    fingerprinter = Fingerprinter(config)
-    recon = ReconModule(config, validator.base_url)
+        # Cross-phase state (populated as phases run)
+        self.seed_urls: list[str] = [self.target_url]
+        self.baseline = None
+        self.landing_html: str = ""
+        self.crawl_results: dict = {}
+        self.all_forms: list[dict] = []
+        self.unique_apis: list[dict] = []
+        self.all_urls: list[str] = []
 
-    # Results container
-    results = {
-        "target": {
-            "url": target_url,
-            "domain": validator.target_domain,
-            "base_url": validator.base_url,
-        },
-        "scan_start": time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime()),
-        "technologies": [],
-        "forms": [],
-        "api_endpoints": [],
-        "file_uploads": [],
-        "interesting_files": [],
-        "comments": [],
-        "emails": [],
-        "parameters": [],
-        "auth_mechanisms": [],
-        "security_headers": [],
-        "robots_txt": {},
-        "sitemap": {},
-        "security_txt": {},
-        "common_paths": [],
-        "all_urls": [],
-        "attack_surface": {},
-        "spa": {},
-        "framework_recon": {},
-        "debug_exposure": {},
-    }
+    async def run(self) -> dict:
+        """Open the shared recon client and drive all nine phases."""
+        recon_headers = {"User-Agent": self.config.get("crawler", {}).get("user_agent", "")}
+        auth_cfg = self.config.get("auth") or {}
+        # Combined auth headers: bearer token (--token) + arbitrary -H headers,
+        # applied to every recon/fingerprint/framework-recon/SPA request.
+        auth_headers = build_auth_headers(auth_cfg.get("token"), auth_cfg.get("headers"))
+        recon_headers.update(auth_headers)
+        # Origin-scope them: strip on any cross-origin redirect the recon
+        # client follows (covers custom headers httpx wouldn't strip itself).
+        recon_hooks: dict = {}
+        if auth_headers:
+            recon_hooks = {"request": [make_auth_strip_hook(
+                self.validator.scheme, self.validator.target_domain, set(auth_headers),
+            )]}
+        async with httpx.AsyncClient(
+            verify=False,
+            headers=recon_headers,
+            limits=httpx.Limits(max_connections=10),
+            event_hooks=recon_hooks,
+        ) as recon_client:
+            await self._phase1_recon(recon_client)
+            await self._phase15_path_probe(recon_client)
+            await self._phase16_body(recon_client)
+            await self._phase17_framework(recon_client)
+            await self._phase18_spa(recon_client)
 
-    spa_analyzer = SPAAnalyzer(config, validator, extractor, html_parser)
-    framework_recon = FrameworkRecon(config, validator)
+        await self._phase2_crawl()
+        self._phase3_extract()
+        self._phase4_fingerprint()
+        self._phase5_surface()
 
-    # ─── Phase 1: Pre-Crawl Recon ───────────────────────────────
-    print_section("PHASE 1: Pre-Crawl Reconnaissance")
+        # Timing
+        self.results["scan_duration"] = round(time.time() - self.start_time, 2)
+        self.results["pages_crawled"] = self.spider.pages_crawled
+        return self.results
 
-    recon_cfg = config.get("recon", {})
-    recon_headers = {"User-Agent": config.get("crawler", {}).get("user_agent", "")}
-    auth_cfg = config.get("auth") or {}
-    # Combined auth headers: bearer token (--token) + arbitrary -H headers,
-    # applied to every recon/fingerprint/framework-recon/SPA request.
-    auth_headers = build_auth_headers(auth_cfg.get("token"), auth_cfg.get("headers"))
-    recon_headers.update(auth_headers)
-    # Origin-scope them: strip on any cross-origin redirect the recon
-    # client follows (covers custom headers httpx wouldn't strip itself).
-    recon_hooks: dict = {}
-    if auth_headers:
-        recon_hooks = {"request": [_make_auth_strip_hook(
-            validator.scheme, validator.target_domain, set(auth_headers),
-        )]}
-    async with httpx.AsyncClient(
-        verify=False,
-        headers=recon_headers,
-        limits=httpx.Limits(max_connections=10),
-        event_hooks=recon_hooks,
-    ) as recon_client:
-        recon_results = await recon.run_all(recon_client)
-        results.update(recon_results)
+    async def _phase1_recon(self, recon_client) -> None:
+        print_section("PHASE 1: Pre-Crawl Reconnaissance")
+
+        # Fetch the catch-all baseline ONCE and share it across every
+        # path-probing phase (recon, fingerprint, framework-recon) so the
+        # same bogus-path round-trip isn't paid for three times per scan.
+        self.baseline = await fetch_baseline(recon_client, self.validator.base_url)
+
+        recon_results = await self.recon.run_all(recon_client, baseline=self.baseline)
+        self.results.update(recon_results)
 
         # Add sitemap URLs to seed list
-        seed_urls = [target_url]
-        sitemap_urls = results.get("sitemap", {}).get("urls", [])
+        sitemap_urls = self.results.get("sitemap", {}).get("urls", [])
         if sitemap_urls:
             for surl in sitemap_urls[:50]:
-                if validator.is_in_scope(surl):
-                    seed_urls.append(surl)
-            print_status(f"Added {len(seed_urls) - 1} sitemap URLs as seeds")
+                if self.validator.is_in_scope(surl):
+                    self.seed_urls.append(surl)
+            print_status(f"Added {len(self.seed_urls) - 1} sitemap URLs as seeds")
 
         # Add robots.txt paths as seeds
-        robots_disallowed = results.get("robots_txt", {}).get("disallowed", [])
+        robots_disallowed = self.results.get("robots_txt", {}).get("disallowed", [])
         for path in robots_disallowed:
-            full_url = f"{validator.base_url}{path}"
-            if validator.is_in_scope(full_url):
-                seed_urls.append(full_url)
+            full_url = f"{self.validator.base_url}{path}"
+            if self.validator.is_in_scope(full_url):
+                self.seed_urls.append(full_url)
 
+    async def _phase15_path_probe(self, recon_client) -> None:
         # ─── Phase 1.5: Fingerprint via path probing ─────────────
-        if not config.get("_no_fingerprint"):
-            print_section("PHASE 1.5: Technology Path Probing")
-            path_detections = await fingerprinter.probe_known_paths(recon_client, validator.base_url)
-            if path_detections:
-                results["technologies"].extend(path_detections)
-            # Dedup after Phase 1.5 so the Phase 4 merge logic sees a
-            # clean per-id list (avoids 6× WordPress rows in the report).
-            results["technologies"] = dedup_technologies(results["technologies"])
-            # Resolve mutually-exclusive collisions (e.g. Laravel vs Rails
-            # both firing on shared <meta name="csrf-token">). Strongest
-            # evidence wins; ties keep both.
-            results["technologies"] = resolve_conflicts(
-                results["technologies"], fingerprinter.signatures
-            )
+        if self.config.get("_no_fingerprint"):
+            return
+        print_section("PHASE 1.5: Technology Path Probing")
+        path_detections = await self.fingerprinter.probe_known_paths(
+            recon_client, self.validator.base_url, baseline=self.baseline,
+        )
+        if path_detections:
+            self.results["technologies"].extend(path_detections)
+        # Dedup + resolve conflicts after Phase 1.5 so the Phase 4 merge
+        # sees a clean per-id list (avoids 6× WordPress rows) and any
+        # mutually-exclusive collision (e.g. Laravel vs Rails on a shared
+        # <meta name="csrf-token">) is settled — strongest evidence wins.
+        self.results["technologies"] = finalize_technologies(
+            self.results["technologies"], self.fingerprinter.signatures
+        )
 
+    async def _phase16_body(self, recon_client) -> None:
         # ─── Phase 1.6: Landing-page body detection ──────────────
         # Fetch the landing HTML and run body/cookie/form-field
         # fingerprint checks. This MUST happen BEFORE framework deep
@@ -318,296 +343,302 @@ async def run_crawler(config: dict) -> dict:
         # (production deploys with Ignition disabled) never trigger the
         # deep-recon phase even when --framework-recon is set.
         print_section("PHASE 1.6: Landing-Page Body Detection")
-        landing_html = ""
         landing_resp = None
         landing_forms: list[dict] = []
         try:
             landing_resp = await recon_client.get(
-                target_url,
+                self.target_url,
                 follow_redirects=True,
                 timeout=httpx.Timeout(10),
             )
-            landing_html = landing_resp.text or ""
+            self.landing_html = landing_resp.text or ""
         except Exception as e:
             print_finding("Landing", f"Could not fetch landing HTML: {e}")
 
-        if landing_html and not config.get("_no_fingerprint"):
+        if self.landing_html and not self.config.get("_no_fingerprint"):
             # Pass forms parsed from the landing HTML so the form_fields:
             # signature channel can fire (Laravel _token, etc.).
-            landing_forms = html_parser.extract_forms(landing_html, target_url)
-            body_detections = fingerprinter.fingerprint_from_response(
-                target_url,
+            landing_forms = self.html_parser.extract_forms(self.landing_html, self.target_url)
+            body_detections = self.fingerprinter.fingerprint_from_response(
+                self.target_url,
                 dict(landing_resp.headers) if landing_resp is not None else {},
-                landing_html,
+                self.landing_html,
                 forms=landing_forms,
             )
-            existing_ids = {t["id"] for t in results["technologies"]}
+            existing_ids = {t["id"] for t in self.results["technologies"]}
             for det in body_detections:
                 if det["id"] not in existing_ids:
-                    results["technologies"].append(det)
+                    self.results["technologies"].append(det)
                     existing_ids.add(det["id"])
             # Re-run dedup + conflict resolution after body merges so
             # the framework_recon decision sees a clean tech list.
-            results["technologies"] = dedup_technologies(results["technologies"])
-            results["technologies"] = resolve_conflicts(
-                results["technologies"], fingerprinter.signatures,
+            self.results["technologies"] = finalize_technologies(
+                self.results["technologies"], self.fingerprinter.signatures,
             )
 
+    async def _phase17_framework(self, recon_client) -> None:
         # ─── Phase 1.7: Framework deep recon ─────────────────────
         # Triggered when a supported framework appears in the detected
         # techs (v1: Laravel) AND framework_recon is enabled or
         # auto_when_detected is set. Mirrors the SPA gating pattern.
         print_section("PHASE 1.7: Framework Deep Recon")
-        results["framework_recon"] = await framework_recon.analyze(
-            recon_client, validator.base_url, results["technologies"],
+        self.results["framework_recon"] = await self.framework_recon.analyze(
+            recon_client, self.validator.base_url, self.results["technologies"],
+            baseline=self.baseline,
         )
         if (
-            results["framework_recon"].get("detected_frameworks")
-            and not results["framework_recon"].get("ran")
+            self.results["framework_recon"].get("detected_frameworks")
+            and not self.results["framework_recon"].get("ran")
         ):
-            detected = results["framework_recon"]["detected_frameworks"]
+            detected = self.results["framework_recon"]["detected_frameworks"]
             print_finding(
                 "Framework Recon",
                 f"{', '.join(d.title() for d in detected)} detected — "
                 "rerun with --framework-recon to probe framework-specific paths",
             )
 
+    async def _phase18_spa(self, recon_client) -> None:
         # ─── Phase 1.8: SPA Analysis ─────────────────────────────
         # Landing HTML was fetched in Phase 1.6; we reuse it here so
         # SPA mining doesn't need a second round-trip.
         print_section("PHASE 1.8: SPA Analysis")
-        results["spa"] = await spa_analyzer.analyze(
-            recon_client, landing_html, validator.base_url, results["technologies"]
+        self.results["spa"] = await self.spa_analyzer.analyze(
+            recon_client, self.landing_html, self.validator.base_url, self.results["technologies"]
         )
 
         # If SPA detected but mining didn't run, nudge the user.
         if (
-            results["spa"].get("detected")
-            and not results["spa"].get("mining_ran")
+            self.results["spa"].get("detected")
+            and not self.results["spa"].get("mining_ran")
         ):
             print_finding(
                 "SPA",
-                f"{results['spa']['framework']} detected — "
+                f"{self.results['spa']['framework']} detected — "
                 "rerun with --spa to mine bundles, routes, and secrets",
             )
 
         # Add SPA-discovered routes to the crawl seed list
-        for route in results["spa"].get("routes", []):
-            route_url = f"{validator.base_url}{route['path']}"
-            if validator.is_in_scope(route_url):
-                seed_urls.append(route_url)
-        if results["spa"].get("routes"):
+        for route in self.results["spa"].get("routes", []):
+            route_url = f"{self.validator.base_url}{route['path']}"
+            if self.validator.is_in_scope(route_url):
+                self.seed_urls.append(route_url)
+        if self.results["spa"].get("routes"):
             print_status(
-                f"Added {len(results['spa']['routes'])} SPA route(s) as crawl seeds"
+                f"Added {len(self.results['spa']['routes'])} SPA route(s) as crawl seeds"
             )
 
-    # ─── Phase 2: Crawl ─────────────────────────────────────────
-    print_section("PHASE 2: Crawling & Discovery")
+    async def _phase2_crawl(self) -> None:
+        # ─── Phase 2: Crawl ─────────────────────────────────────────
+        print_section("PHASE 2: Crawling & Discovery")
+        self.seed_urls = list(set(self.seed_urls))
+        self.crawl_results = await self.spider.crawl(self.seed_urls)
 
-    seed_urls = list(set(seed_urls))
-    crawl_results = await spider.crawl(seed_urls)
+    def _phase3_extract(self) -> None:
+        # ─── Phase 3: Extract & Analyze ─────────────────────────────
+        print_section("PHASE 3: Extraction & Analysis")
 
-    # ─── Phase 3: Extract & Analyze ─────────────────────────────
-    print_section("PHASE 3: Extraction & Analysis")
+        self.all_urls = list(self.crawl_results.keys())
+        self.results["all_urls"] = sorted(self.all_urls)
+        all_emails = set()
+        self.all_forms = []
+        all_api_endpoints = []
+        all_comments = []
+        all_auth = []
+        all_security_headers = []
+        all_js_endpoints = []
+        # Stack-trace mining runs on every crawled page regardless of any
+        # framework flag — it's the universal "did the server leak debug
+        # info in an error response?" check.
+        stacktrace_findings: list[tuple[str, dict]] = []
 
-    all_urls = list(crawl_results.keys())
-    results["all_urls"] = sorted(all_urls)
-    all_emails = set()
-    all_forms = []
-    all_api_endpoints = []
-    all_comments = []
-    all_auth = []
-    all_security_headers = []
-    all_js_endpoints = []
-    # Stack-trace mining runs on every crawled page regardless of any
-    # framework flag — it's the universal "did the server leak debug
-    # info in an error response?" check.
-    stacktrace_findings: list[tuple[str, dict]] = []
+        recon_cfg = self.config.get("recon", {})
+        extract_cfg = self.config.get("extract", {})
 
-    extract_cfg = config.get("extract", {})
+        for url, crawl_result in self.crawl_results.items():
+            if crawl_result.error or not crawl_result.body:
+                continue
 
-    for url, crawl_result in crawl_results.items():
-        if crawl_result.error or not crawl_result.body:
-            continue
+            body = crawl_result.body
+            headers = crawl_result.headers
 
-        body = crawl_result.body
-        headers = crawl_result.headers
+            # Stack-trace miner — empty dict for clean pages, populated
+            # dict for pages with debug/framework/ignition signals.
+            st = mine_response(body)
+            if st:
+                stacktrace_findings.append((url, st))
 
-        # Stack-trace miner — empty dict for clean pages, populated
-        # dict for pages with debug/framework/ignition signals.
-        st = mine_response(body)
-        if st:
-            stacktrace_findings.append((url, st))
+            # Extract forms
+            if extract_cfg.get("forms", True):
+                forms = self.html_parser.extract_forms(body, url)
+                self.all_forms.extend(forms)
 
-        # Extract forms
-        if extract_cfg.get("forms", True):
-            forms = html_parser.extract_forms(body, url)
-            all_forms.extend(forms)
+            # Extract comments
+            if extract_cfg.get("comments", True):
+                comments = self.html_parser.extract_comments(body, url)
+                all_comments.extend(comments)
 
-        # Extract comments
-        if extract_cfg.get("comments", True):
-            comments = html_parser.extract_comments(body, url)
-            all_comments.extend(comments)
+            # Extract emails
+            if extract_cfg.get("emails", True):
+                emails = self.html_parser.extract_emails(body)
+                all_emails.update(emails)
 
-        # Extract emails
-        if extract_cfg.get("emails", True):
-            emails = html_parser.extract_emails(body)
-            all_emails.update(emails)
+            # Extract API endpoints from URL/response
+            if extract_cfg.get("api_endpoints", True):
+                apis = self.extractor.extract_api_endpoints(url, headers, body)
+                all_api_endpoints.extend(apis)
 
-        # Extract API endpoints from URL/response
-        if extract_cfg.get("api_endpoints", True):
-            apis = extractor.extract_api_endpoints(url, headers, body)
-            all_api_endpoints.extend(apis)
+            # Extract JS endpoints
+            if extract_cfg.get("js_endpoints", True):
+                scripts = self.html_parser.extract_scripts(body)
+                for inline_js in scripts.get("inline", []):
+                    js_eps = self.extractor.extract_js_endpoints(inline_js, url)
+                    all_js_endpoints.extend(js_eps)
 
-        # Extract JS endpoints
-        if extract_cfg.get("js_endpoints", True):
-            scripts = html_parser.extract_scripts(body)
-            for inline_js in scripts.get("inline", []):
-                js_eps = extractor.extract_js_endpoints(inline_js, url)
-                all_js_endpoints.extend(js_eps)
+            # Detect auth mechanisms + security headers (separate taxonomies)
+            if recon_cfg.get("auth_detection", True):
+                if extract_cfg.get("forms"):
+                    page_forms = [f for f in self.all_forms if f["found_on"] == url]
+                else:
+                    page_forms = self.html_parser.extract_forms(body, url)
+                auth = self.recon.detect_auth_mechanisms(
+                    url, headers, body, page_forms,
+                    set_cookies=getattr(crawl_result, "set_cookies", None),
+                )
+                all_auth.extend(auth)
+                all_security_headers.extend(self.recon.detect_security_headers(url, headers))
 
-        # Detect auth mechanisms + security headers (separate taxonomies)
-        if recon_cfg.get("auth_detection", True):
-            if extract_cfg.get("forms"):
-                page_forms = [f for f in all_forms if f["found_on"] == url]
-            else:
-                page_forms = html_parser.extract_forms(body, url)
-            auth = recon.detect_auth_mechanisms(
-                url, headers, body, page_forms,
-                set_cookies=getattr(crawl_result, "set_cookies", None),
-            )
-            all_auth.extend(auth)
-            all_security_headers.extend(recon.detect_security_headers(url, headers))
-
-        # Track interesting files
-        if validator.is_interesting_file(url):
-            results["interesting_files"].append({
-                "url": url,
-                "status_code": crawl_result.status_code,
-                "content_type": crawl_result.content_type,
-            })
-
-    # Deduplicate API endpoints (includes SPA-mined endpoints)
-    spa_endpoints = results.get("spa", {}).get("api_endpoints_from_bundles", [])
-    seen_apis = set()
-    unique_apis = []
-    for api in all_api_endpoints + all_js_endpoints + spa_endpoints:
-        key = api.get("url", "")
-        if key not in seen_apis:
-            seen_apis.add(key)
-            unique_apis.append(api)
-
-    results["forms"] = all_forms
-    results["api_endpoints"] = unique_apis
-    results["comments"] = all_comments
-    results["emails"] = sorted(all_emails)
-    results["parameters"] = extractor.extract_url_parameters(all_urls)
-
-    # Merge stack-trace findings into the debug_exposure block. If the
-    # stack-trace miner identified a framework that the fingerprinter
-    # didn't, synthesise a tech entry so the operator sees it in the
-    # summary tech table too.
-    if stacktrace_findings:
-        results["debug_exposure"] = merge_findings(stacktrace_findings)
-        st_framework = results["debug_exposure"].get("framework")
-        if st_framework:
-            # Normalise to a fingerprint id: "Spring Boot" -> "springboot"
-            # so the synthesised entry merges with the springboot signature.
-            tech_id = st_framework.lower().replace(" ", "")
-            existing_ids = {t.get("id") for t in results["technologies"]}
-            if tech_id not in existing_ids:
-                results["technologies"].append({
-                    "id": tech_id,
-                    "name": st_framework,
-                    "category": "Framework",
-                    "version": results["debug_exposure"].get("framework_version"),
-                    "matched_on": [{
-                        "method": "stacktrace",
-                        "detail": "Detected via leaked stack trace in error response",
-                    }],
-                    "confidence": "high",
+            # Track interesting files
+            if self.validator.is_interesting_file(url):
+                self.results["interesting_files"].append({
+                    "url": url,
+                    "status_code": crawl_result.status_code,
+                    "content_type": crawl_result.content_type,
                 })
-            else:
-                # Add stack-trace evidence to the existing entry
-                for tech in results["technologies"]:
-                    if tech.get("id") == tech_id:
-                        tech.setdefault("matched_on", []).append({
+
+        # Deduplicate API endpoints (includes SPA-mined endpoints)
+        spa_endpoints = self.results.get("spa", {}).get("api_endpoints_from_bundles", [])
+        seen_apis = set()
+        self.unique_apis = []
+        for api in all_api_endpoints + all_js_endpoints + spa_endpoints:
+            key = api.get("url", "")
+            if key not in seen_apis:
+                seen_apis.add(key)
+                self.unique_apis.append(api)
+
+        self.results["forms"] = self.all_forms
+        self.results["api_endpoints"] = self.unique_apis
+        self.results["comments"] = all_comments
+        self.results["emails"] = sorted(all_emails)
+        self.results["parameters"] = self.extractor.extract_url_parameters(self.all_urls)
+
+        # Merge stack-trace findings into the debug_exposure block. If the
+        # stack-trace miner identified a framework that the fingerprinter
+        # didn't, synthesise a tech entry so the operator sees it in the
+        # summary tech table too.
+        if stacktrace_findings:
+            self.results["debug_exposure"] = merge_findings(stacktrace_findings)
+            st_framework = self.results["debug_exposure"].get("framework")
+            if st_framework:
+                # Normalise to a fingerprint id: "Spring Boot" -> "springboot"
+                # so the synthesised entry merges with the springboot signature.
+                tech_id = st_framework.lower().replace(" ", "")
+                existing_ids = {t.get("id") for t in self.results["technologies"]}
+                if tech_id not in existing_ids:
+                    self.results["technologies"].append({
+                        "id": tech_id,
+                        "name": st_framework,
+                        "category": "Framework",
+                        "version": self.results["debug_exposure"].get("framework_version"),
+                        "matched_on": [{
                             "method": "stacktrace",
                             "detail": "Detected via leaked stack trace in error response",
-                        })
-                        if not tech.get("version") and results["debug_exposure"].get("framework_version"):
-                            tech["version"] = results["debug_exposure"]["framework_version"]
-                        break
+                        }],
+                        "confidence": "high",
+                    })
+                else:
+                    # Add stack-trace evidence to the existing entry
+                    for tech in self.results["technologies"]:
+                        if tech.get("id") == tech_id:
+                            tech.setdefault("matched_on", []).append({
+                                "method": "stacktrace",
+                                "detail": "Detected via leaked stack trace in error response",
+                            })
+                            if not tech.get("version") and self.results["debug_exposure"].get("framework_version"):
+                                tech["version"] = self.results["debug_exposure"]["framework_version"]
+                            break
 
-    # Deduplicate auth mechanisms
-    seen_auth = set()
-    unique_auth = []
-    for a in all_auth:
-        key = f"{a['type']}:{a.get('url', '')}:{a.get('detail', '')[:50]}"
-        if key not in seen_auth:
-            seen_auth.add(key)
-            unique_auth.append(a)
-    results["auth_mechanisms"] = unique_auth
+        # Deduplicate auth mechanisms
+        seen_auth = set()
+        unique_auth = []
+        for a in all_auth:
+            key = f"{a['type']}:{a.get('url', '')}:{a.get('detail', '')[:50]}"
+            if key not in seen_auth:
+                seen_auth.add(key)
+                unique_auth.append(a)
+        self.results["auth_mechanisms"] = unique_auth
 
-    # Deduplicate security headers — same header on same URL with same value
-    # is a single finding regardless of how many times we saw it. Collapse
-    # across URLs at presentation time but keep one entry per (header, value)
-    # to give the operator one snapshot rather than a per-URL flood.
-    seen_sh: set[tuple[str, str]] = set()
-    unique_security_headers = []
-    for sh in all_security_headers:
-        key = (sh.get("header", ""), sh.get("value", ""))
-        if key in seen_sh:
-            continue
-        seen_sh.add(key)
-        unique_security_headers.append(sh)
-    results["security_headers"] = unique_security_headers
+        # Deduplicate security headers — same header on same URL with same value
+        # is a single finding regardless of how many times we saw it. Collapse
+        # across URLs at presentation time but keep one entry per (header, value)
+        # to give the operator one snapshot rather than a per-URL flood.
+        seen_sh: set[tuple[str, str]] = set()
+        unique_security_headers = []
+        for sh in all_security_headers:
+            key = (sh.get("header", ""), sh.get("value", ""))
+            if key in seen_sh:
+                continue
+            seen_sh.add(key)
+            unique_security_headers.append(sh)
+        self.results["security_headers"] = unique_security_headers
 
-    # File uploads
-    results["file_uploads"] = [f for f in all_forms if f.get("has_file_upload")]
+        # File uploads
+        self.results["file_uploads"] = [f for f in self.all_forms if f.get("has_file_upload")]
 
-    # ─── Phase 4: Fingerprinting ────────────────────────────────
-    if not config.get("_no_fingerprint"):
+    def _phase4_fingerprint(self) -> None:
+        # ─── Phase 4: Fingerprinting ────────────────────────────────
+        if self.config.get("_no_fingerprint"):
+            return
         print_section("PHASE 4: Technology Fingerprinting")
         # Group forms by URL so the form_fields: signature channel can
         # fire on the aggregated pass (Laravel _token detection, etc).
         forms_by_url: dict[str, list[dict]] = {}
-        for f in all_forms:
+        for f in self.all_forms:
             forms_by_url.setdefault(f.get("found_on", ""), []).append(f)
-        crawl_detections = fingerprinter.fingerprint_aggregate(
-            crawl_results, forms_by_url=forms_by_url,
+        crawl_detections = self.fingerprinter.fingerprint_aggregate(
+            self.crawl_results, forms_by_url=forms_by_url,
         )
 
         # Append all crawl detections and run one unified dedup pass —
         # avoids the bug where Phase 4's inline merge silently dropped
         # extra evidence when entries had been duplicated by Phase 1.5.
-        results["technologies"].extend(crawl_detections)
-        results["technologies"] = dedup_technologies(results["technologies"])
-        # Final conflict-resolution pass after all evidence is in.
-        results["technologies"] = resolve_conflicts(
-            results["technologies"], fingerprinter.signatures
+        self.results["technologies"].extend(crawl_detections)
+        # Final dedup + conflict-resolution pass after all evidence is in.
+        self.results["technologies"] = finalize_technologies(
+            self.results["technologies"], self.fingerprinter.signatures
         )
 
-        for tech in results["technologies"]:
+        for tech in self.results["technologies"]:
             print_finding(
                 "Tech",
                 f"{tech['name']} ({tech.get('category', '')}) "
                 f"v{tech.get('version', '?')} [{tech.get('confidence', '?')}]",
             )
 
-    # ─── Phase 5: Attack Surface Summary ────────────────────────
-    print_section("PHASE 5: Attack Surface Analysis")
+    def _phase5_surface(self) -> None:
+        # ─── Phase 5: Attack Surface Summary ────────────────────────
+        print_section("PHASE 5: Attack Surface Analysis")
+        self.results["attack_surface"] = self.extractor.analyze_attack_surface(
+            self.all_forms, self.all_urls, self.unique_apis
+        )
 
-    results["attack_surface"] = extractor.analyze_attack_surface(
-        all_forms, all_urls, unique_apis
-    )
 
-    # Timing
-    elapsed = round(time.time() - start_time, 2)
-    results["scan_duration"] = elapsed
-    results["pages_crawled"] = spider.pages_crawled
+async def run_crawler(config: dict) -> dict:
+    """Main crawler orchestration logic.
 
-    return results
+    Thin wrapper over :class:`CrawlOrchestrator` — the module-level entry
+    point that ``main()`` (and any external caller) invokes.
+    """
+    return await CrawlOrchestrator(config).run()
 
 
 def main():

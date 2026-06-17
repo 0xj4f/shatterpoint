@@ -10,6 +10,8 @@ Pure functions for:
   - warning when a JWT is expired or expiring soon
   - deciding whether auth material is safe to send to a given URL
     (used for redirect-strip logic so credentials never leak off-origin)
+  - building an httpx request hook that strips every auth header when a
+    request leaves the target origin (cross-origin redirect protection)
 
 None of these helpers make network calls. None raise on bad input —
 opaque or malformed tokens return None from the decode helpers so the
@@ -20,7 +22,11 @@ import base64
 import json
 import os
 import time
+from typing import TYPE_CHECKING
 from urllib.parse import urlparse
+
+if TYPE_CHECKING:
+    import httpx
 
 ENV_VAR = "SHATTERPOINT_TOKEN"
 _DEFAULT_PORTS = {"http": 80, "https": 443}
@@ -132,6 +138,27 @@ def should_send_auth(
         )
     except Exception:
         return False
+
+
+def make_auth_strip_hook(
+    scheme: str, netloc: str, auth_header_names: set[str]
+):
+    """Build an httpx request event hook that strips auth headers when a
+    request leaves the target origin (e.g. a cross-origin redirect that
+    httpx follows). httpx auto-strips `Authorization` cross-origin but NOT
+    custom headers (X-API-Key, Cookie, ...), so this covers every -H header
+    uniformly — matching the spider's per-hop origin scoping. Reuses
+    `should_send_auth` for the origin check.
+    """
+    lowered = {n.lower() for n in auth_header_names}
+
+    async def _strip(request: "httpx.Request") -> None:
+        if not should_send_auth(scheme, netloc, str(request.url)):
+            for hname in list(request.headers.keys()):
+                if hname.lower() in lowered:
+                    del request.headers[hname]
+
+    return _strip
 
 
 # ─── Arbitrary auth headers (-H "Name: value") ────────────────────────

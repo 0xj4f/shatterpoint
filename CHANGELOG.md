@@ -27,6 +27,7 @@ auto-increments. See [README — Release process](README.md) for details.
   - CVE column in the framework-recon report table + manual-pointers tree.
 - **Three new Docker labs** (`labs/django`, `labs/flask`, `labs/springboot`) on ports 8084–8086, wired into `docker-compose.yml` + `Makefile`. All six labs verified end-to-end, including a WordPress/Rails cross-check proving zero framework bleed.
 - **Jenkins + GitLab fingerprint-only CVE pointers.** Added `jenkins` and `gitlab` framework-recon profiles with **no GET probes** (their flagship CVEs are non-GET vectors) that surface manual-test guidance off the existing fingerprints: Jenkins **CVE-2024-23897** (CLI `@file` arbitrary read → RCE) and GitLab **CVE-2021-22205** (unauthenticated ExifTool image-upload RCE). Signal-only; the passivity guard and per-framework manual-pointer test stay green. Verified end-to-end against the vulnerable-software-neighborhood labs `05-jenkins-cli-fileread` and `06-gitlab-exiftool`.
+- **`docs/ARCHITECTURE.md`** — Mermaid diagrams of the nine-phase scan pipeline, the module call-graph, and the auth origin-scoping flow, plus a phase-responsibility table, a results-dict schema, and the precision-guard legend. Linked from the README and `docs/features.md`.
 
 ### Changed
 - **`MAJOR_VERSION` / `MINOR_VERSION` hardcoded in `release.yml`** (was GitHub repo Variables) so the version line is monitored in the codebase and reviewed via PR. Also fixes the cause of the first release run not tagging.
@@ -74,6 +75,13 @@ auto-increments. See [README — Release process](README.md) for details.
   - `labs/wordpress/` — official `wordpress:6` image + MariaDB 10.11 sidecar, fresh install. Exercises CMS path probing + 404-baseline filter on a real-world catch-all-style server.
   - `labs/Makefile` — `make up / down / scan-laravel / scan-laravel-recon / scan-rails / scan-wordpress / scan-all`.
   - All three on adjacent ports (8081/8082/8083) to avoid the common 80xx range.
+- **DRY / orchestrator refactor of `crawler.py`** — pure structural cleanup, **no behaviour change**:
+  - The catch-all 404/redirect baseline is now fetched **once** per scan and threaded into recon / fingerprint / framework-recon (was three redundant fetches → two network round-trips saved); each module keeps a `baseline=None` fallback for standalone use.
+  - The dedup → conflict-resolution pair (run after Phases 1.5, 1.6, 4) is consolidated behind one `finalize_technologies()` helper so the call sites can't drift out of order.
+  - The recon-client auth origin-strip hook moved from `crawler.py` to `utils/auth.py` as public `make_auth_strip_hook`, co-located with `should_send_auth`.
+  - The ~400-line `run_crawler` monolith is extracted into a `CrawlOrchestrator` class with one method per phase (`_phase1_recon` … `_phase5_surface`); `run_crawler()` stays as a thin wrapper.
+  - **Verified zero behaviour change**: 180 unit tests + ruff clean, plus a live pre/post A/B scan of four VSN labs (laravel-ignition, django-debug, spring-cloud-gateway, gitlab) — `technologies` / `common_paths` / `framework_recon` / `debug_exposure` byte-identical on the deterministic targets (gitlab's only variance was crawl-coverage nondeterminism on its 500-page cap, reproduced across two same-code runs).
+- 3 new unit tests: `finalize_technologies` equivalence + empty-input, and shared-baseline pass-through (asserts each module uses the threaded baseline instead of re-fetching).
 
 ---
 
