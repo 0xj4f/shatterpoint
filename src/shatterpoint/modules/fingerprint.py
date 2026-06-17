@@ -10,7 +10,7 @@ from pathlib import Path
 import httpx
 import yaml
 
-from shatterpoint.utils.baseline import fetch_baseline
+from shatterpoint.utils.baseline import Baseline, fetch_baseline
 from shatterpoint.utils.formatter import print_finding, print_status
 
 
@@ -114,6 +114,19 @@ def dedup_technologies(techs: list[dict]) -> list[dict]:
         if confidence_rank.get(new_conf, 0) > confidence_rank.get(existing.get("confidence"), 0):
             existing["confidence"] = new_conf
     return [by_id[tid] for tid in order]
+
+
+def finalize_technologies(techs: list[dict], signatures: dict) -> list[dict]:
+    """Merge duplicate detections, then drop conflicting weaker ones.
+
+    The canonical two-step the crawler runs after every phase that adds to
+    ``results["technologies"]`` (path probing, landing-body detection, crawl
+    aggregate): :func:`dedup_technologies` collapses repeat detections by id,
+    then :func:`resolve_conflicts` drops the weaker of any mutually-
+    incompatible pair. Kept as one helper so the call sites can't drift out
+    of order or get applied inconsistently.
+    """
+    return resolve_conflicts(dedup_technologies(techs), signatures)
 
 
 class Fingerprinter:
@@ -247,7 +260,10 @@ class Fingerprinter:
         return results
 
     async def probe_known_paths(
-        self, client: httpx.AsyncClient, base_url: str
+        self,
+        client: httpx.AsyncClient,
+        base_url: str,
+        baseline: Baseline | None = None,
     ) -> list[dict]:
         """
         Probe known technology-specific paths to detect technologies.
@@ -255,11 +271,14 @@ class Fingerprinter:
 
         Uses a 404-baseline to suppress false positives from catch-all
         routers (SPA dev servers, Next.js fallback handlers) that return
-        HTTP 200 with the same body for every URL.
+        HTTP 200 with the same body for every URL. `baseline` is normally
+        the shared snapshot threaded from the orchestrator; when None we
+        fetch our own.
         """
         detections = []
         probed_paths = set()
-        baseline = await fetch_baseline(client, base_url)
+        if baseline is None:
+            baseline = await fetch_baseline(client, base_url)
         if baseline.available:
             print_status(
                 f"Fingerprint baseline: status={baseline.status_code}, "

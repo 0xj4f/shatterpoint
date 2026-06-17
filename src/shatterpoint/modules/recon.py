@@ -9,7 +9,7 @@ from xml.etree import ElementTree
 
 import httpx
 
-from shatterpoint.utils.baseline import fetch_baseline
+from shatterpoint.utils.baseline import Baseline, fetch_baseline
 from shatterpoint.utils.formatter import print_finding, print_status
 
 
@@ -65,8 +65,15 @@ class ReconModule:
         self.config = config.get("recon", {})
         self.base_url = base_url.rstrip("/")
 
-    async def run_all(self, client: httpx.AsyncClient) -> dict:
-        """Run all recon modules and return combined results."""
+    async def run_all(
+        self, client: httpx.AsyncClient, baseline: Baseline | None = None
+    ) -> dict:
+        """Run all recon modules and return combined results.
+
+        `baseline` is the shared catch-all snapshot fetched once by the
+        orchestrator. When None (standalone use / unit tests) the common-
+        path probe fetches its own.
+        """
         results = {}
 
         if self.config.get("robots_txt", True):
@@ -79,7 +86,7 @@ class ReconModule:
             results["security_txt"] = await self.check_security_txt(client)
 
         if self.config.get("common_paths", True):
-            results["common_paths"] = await self.probe_common_paths(client)
+            results["common_paths"] = await self.probe_common_paths(client, baseline=baseline)
 
         if self.config.get("auth_detection", True):
             results["auth_mechanisms"] = []  # Populated during crawl analysis
@@ -238,15 +245,19 @@ class ReconModule:
 
         return result
 
-    async def probe_common_paths(self, client: httpx.AsyncClient) -> list[dict]:
+    async def probe_common_paths(
+        self, client: httpx.AsyncClient, baseline: Baseline | None = None
+    ) -> list[dict]:
         """Probe common sensitive/interesting paths.
 
-        Captures a 404-baseline first; probes whose response matches the
-        baseline (catch-all SPA routers, custom soft-404 pages) are dropped
-        instead of being reported as 'found'.
+        Uses a 404-baseline; probes whose response matches the baseline
+        (catch-all SPA routers, custom soft-404 pages) are dropped instead
+        of being reported as 'found'. `baseline` is normally the shared
+        snapshot threaded from run_all; when None we fetch our own.
         """
         found = []
-        baseline = await fetch_baseline(client, self.base_url)
+        if baseline is None:
+            baseline = await fetch_baseline(client, self.base_url)
         if baseline.available:
             print_status(
                 f"404 baseline: status={baseline.status_code}, "

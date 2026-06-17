@@ -278,7 +278,7 @@ CLI flags override config file values.
 
 Reports are saved as JSON to `./output/recon_{domain}_{timestamp}.json`.
 
-See [docs/schema.md](docs/schema.md) for the full report schema and [docs/features.md](docs/features.md) for detailed feature documentation.
+See [docs/schema.md](docs/schema.md) for the full report schema, [docs/features.md](docs/features.md) for detailed feature documentation, and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the scan pipeline and module design.
 
 ---
 
@@ -305,6 +305,7 @@ shatterpoint/
 ├── tests/
 │   └── test_smoke.py
 └── docs/
+    ├── ARCHITECTURE.md         # Scan pipeline, module graph, precision guards
     ├── features.md
     └── schema.md
 ```
