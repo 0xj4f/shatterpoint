@@ -11,7 +11,10 @@ auto-increments. See [README — Release process](README.md) for details.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+- **Technology false-positives from weak body substrings (precision pass).** Hardened the fingerprint signatures that fired on any page merely *mentioning* a technology in inline scripts, JSON, or UI text. `react`/`vue`/`angular` now require real DOM markers (`data-reactroot`, `__vue__`, `ng-version`, `_nghost`…) or a versioned CDN `<script src>`; `jquery` is detected only via a real versioned `<script src>` (now matching the `jquery.min.js?ver=` form WordPress/Drupal use); `jenkins` drops the bare `"Jenkins"` word for the `X-Jenkins` header + `Jenkins-Crumb` markup; `gitlab` drops bare `"gitlab"` for the definitive `X-Gitlab-Feature-Category` header + `_gitlab_session` cookie; `springboot` requires `org.springframework.boot` (not bare `org.springframework`, which Jenkins' bundled spring-security tripped). Most visibly, GitLab no longer reports **Jenkins at HIGH confidence** or **Spring Boot**, and is itself detected via its header instead of a substring.
+- **Content-type gate on fingerprinting.** The body/script/meta signature channels now run only on `text/html` responses, so a framework substring inside a JSON API response or a crawled `.js` bundle no longer produces a detection (headers/cookies still apply to any response type).
+- Verified by a live pre/post A/B across 10 VSN labs: every confirmed false positive removed (gitlab `jenkins`/`react`, drupal `react`, jenkins `springboot`) with all true positives retained (gitlab/jenkins/Next.js still detected, jQuery still detected via `<script src>` on WordPress + Drupal, all CMS/framework detections unchanged). Test suite now 186.
 
 ## [1.1.0] - 2026-06-17
 

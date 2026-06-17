@@ -205,10 +205,21 @@ class Fingerprinter:
                 result.headers, getattr(result, "set_cookies", None),
             )
 
+            # Content-type gate: the body/script/meta channels only run on
+            # HTML. A bare substring like "react"/"gitlab" in a JSON API
+            # response or a crawled .js bundle is not page evidence, so we
+            # withhold the body for non-HTML responses (headers + cookies
+            # still apply — those are reliable regardless of content-type).
+            ct = (
+                getattr(result, "content_type", "")
+                or result.headers.get("content-type", "")
+            ).lower()
+            body_for_fp = result.body if "html" in ct else ""
+
             detections = self.fingerprint_from_response(
                 url,
                 result.headers,
-                result.body,
+                body_for_fp,
                 cookies,
                 forms=forms_by_url.get(url),
             )

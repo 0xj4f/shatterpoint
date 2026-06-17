@@ -137,16 +137,18 @@ springboot:
   name: "Spring Boot"
   category: "Framework"
   # X-Application-Context is a Spring-Boot-specific header (older 1.x/2.x).
-  # The Whitelabel Error Page + org.springframework body markers are
-  # distinctive. /actuator/health returning {"status":"UP"} is the classic
-  # Spring Boot tell. Each signal is Spring-specific (no bare PHP/server
-  # banners that would false-positive on unrelated apps).
+  # The Whitelabel Error Page is distinctive. The body trace marker must be
+  # org.springframework.BOOT — bare "org.springframework" false-positives
+  # on anything bundling spring-security (e.g. Jenkins → org.springframework.
+  # security.*), mirroring the same tightening already applied to the
+  # stack-trace miner. /actuator/health returning {"status":"UP"} is the
+  # classic Spring Boot tell.
   headers:
     - header: "x-application-context"
       pattern: "."
   body:
     - "Whitelabel Error Page"
-    - "org.springframework"
+    - "org.springframework.boot"
   paths:
     - "/actuator/health"
 
@@ -309,11 +311,12 @@ cloudflare:
 jquery:
   name: "jQuery"
   category: "JavaScript Library"
-  body:
-    - "jquery"
-    - "jQuery"
+  # Detect only via a real versioned <script src> include (covers
+  # jquery-3.6.0.min.js, jquery.min.js?ver=, jquery.slim.min.js). The
+  # bare "jquery"/"jQuery" body substrings fired on any minified bundle
+  # or page that merely referenced jquery.* in code.
   scripts:
-    - pattern: "jquery[.-]([\\d.]+)(?:\\.min)?\\.js"
+    - pattern: "jquery(?:[-.]([\\d.]+))?(?:\\.slim)?(?:\\.min)?\\.js"
 
 bootstrap:
   name: "Bootstrap"
@@ -332,26 +335,39 @@ bootstrap:
 react:
   name: "React"
   category: "JavaScript Framework"
+  # Bare "react" body substring false-fires on any minified bundle / code
+  # that references react.* — require a real React DOM-root marker or a
+  # versioned CDN <script src>. Bundle-only React surfaces via --spa.
   body:
-    - "react"
-    - "_reactRootContainer"
     - "data-reactroot"
+    - "_reactRootContainer"
+  scripts:
+    - pattern: "react(?:-dom)?[-.@]([\\d.]+)(?:\\.min)?\\.js"
 
 angular:
   name: "Angular"
   category: "JavaScript Framework"
+  # Dropped bare "angular" (fires on any bundle mentioning angular).
+  # ng-version / ng-app are HTML attributes; _nghost / _ngcontent are
+  # Angular's view-encapsulation attributes in rendered markup.
   body:
     - "ng-version"
     - "ng-app"
-    - "angular"
+    - "_nghost"
+    - "_ngcontent"
 
 vue:
   name: "Vue.js"
   category: "JavaScript Framework"
+  # Dropped bare "Vue.js" (matches any comment/string naming the library).
+  # __vue__ / v-cloak / data-v-app are real Vue runtime/markup markers;
+  # plus a versioned CDN <script src>.
   body:
-    - "Vue.js"
     - "__vue__"
     - "v-cloak"
+    - "data-v-app"
+  scripts:
+    - pattern: "vue(?:@|[-.])([\\d.]+)(?:\\.min)?\\.js"
 
 nextjs:
   name: "Next.js"
@@ -415,25 +431,31 @@ grafana:
 jenkins:
   name: "Jenkins"
   category: "CI/CD"
-  # The X-Jenkins header is the definitive signal (present on every
-  # Jenkins response). REMOVED the generic /login path (any app with a
-  # 200 /login was being tagged Jenkins). /script + /manage redirect to
-  # /login when unauthenticated, so they add little beyond the header;
-  # kept the body marker as a secondary confirm.
+  # The X-Jenkins header is the definitive signal. Dropped the bare
+  # "Jenkins" body word — it fired on any page merely naming Jenkins
+  # (e.g. GitLab's CI-integration label, scoring a HIGH false positive).
+  # "Jenkins-Crumb" is Jenkins-specific CSRF-crumb markup only real
+  # Jenkins emits, so it's a safe secondary confirm.
   headers:
     - header: "x-jenkins"
       pattern: "([\\d.]+)"
   body:
-    - "Jenkins"
+    - "Jenkins-Crumb"
 
 gitlab:
   name: "GitLab"
   category: "Version Control"
+  # Dropped the bare "gitlab" body word (fired on any page mentioning
+  # GitLab). X-Gitlab-Feature-Category is a definitive GitLab response
+  # header; the _gitlab_session cookie + sign-in/api paths corroborate.
   paths:
     - "/users/sign_in"
     - "/api/v4/"
+  headers:
+    - header: "x-gitlab-feature-category"
+      pattern: "."
+  cookies:
+    - "_gitlab_session"
   meta:
     - name: "description"
       pattern: "(?i)gitlab"
-  body:
-    - "gitlab"

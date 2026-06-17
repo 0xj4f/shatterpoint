@@ -378,23 +378,128 @@ def test_security_headers_empty_when_none_present():
 # ─── Fingerprint body matching tests ──────────────────────────────────
 
 
-def test_fingerprint_body_word_boundary_matches_standalone():
-    fp = Fingerprinter({
-        "fingerprint": {
-            "check_headers": True,
-            "check_cookies": True,
-            "check_meta": True,
-            "check_scripts": True,
-        }
-    })
-    # Standalone "react" token in body → should fire React detection
-    detections = fp.fingerprint_from_response(
-        "http://test.com",
-        {},
+def _names(detections):
+    return {d["name"] for d in detections}
+
+
+def test_fingerprint_react_requires_real_marker_not_bare_substring():
+    # Precision-first: a bare "react" token in a script/body must NOT fire
+    # React (it appears in any bundle referencing react.*); a real React
+    # DOM-root marker must.
+    fp = Fingerprinter({})
+    bare = fp.fingerprint_from_response(
+        "http://t", {},
         '<html><body><script>var react = require("react");</script></body></html>',
     )
-    names = {d["name"] for d in detections}
-    assert "React" in names
+    assert "React" not in _names(bare)
+    real = fp.fingerprint_from_response(
+        "http://t", {}, '<html><body><div id="root" data-reactroot=""></div></body></html>',
+    )
+    assert "React" in _names(real)
+
+
+def test_fingerprint_vue_requires_real_marker_not_bare_substring():
+    fp = Fingerprinter({})
+    bare = fp.fingerprint_from_response(
+        "http://t", {}, "<html><body><!-- built with Vue.js --></body></html>",
+    )
+    assert "Vue.js" not in _names(bare)
+    real = fp.fingerprint_from_response(
+        "http://t", {}, "<html><body><div data-v-app></div><span v-cloak></span></body></html>",
+    )
+    assert "Vue.js" in _names(real)
+
+
+def test_fingerprint_jquery_requires_script_src_not_bare_word():
+    fp = Fingerprinter({})
+    bare = fp.fingerprint_from_response(
+        "http://t", {}, "<html><body><script>jquery.fn.extend({});</script></body></html>",
+    )
+    assert "jQuery" not in _names(bare)
+    # Real <script src> includes — WordPress (?ver=), Drupal (?v=), CDN forms
+    for src in (
+        "/wp-includes/js/jquery/jquery.min.js?ver=3.5.1",
+        "/core/assets/vendor/jquery/jquery.min.js?v=3.2.1",
+        "https://code.jquery.com/jquery-3.6.0.min.js",
+    ):
+        det = fp.fingerprint_from_response(
+            "http://t", {}, f'<html><head><script src="{src}"></script></head></html>',
+        )
+        assert "jQuery" in _names(det), src
+
+
+def test_fingerprint_jenkins_not_from_bare_word_but_header_or_crumb():
+    fp = Fingerprinter({})
+    # A page merely naming Jenkins (e.g. GitLab's CI-integration label) → no FP
+    bare = fp.fingerprint_from_response(
+        "http://t", {}, "<html><body>Configure your Jenkins server URL here</body></html>",
+    )
+    assert "Jenkins" not in _names(bare)
+    via_header = fp.fingerprint_from_response("http://t", {"x-jenkins": "2.441"}, "")
+    assert "Jenkins" in _names(via_header)
+    via_crumb = fp.fingerprint_from_response(
+        "http://t", {}, '<html><body><div data-crumb-header="Jenkins-Crumb"></div></body></html>',
+    )
+    assert "Jenkins" in _names(via_crumb)
+
+
+def test_fingerprint_gitlab_not_from_bare_word_but_header():
+    fp = Fingerprinter({})
+    bare = fp.fingerprint_from_response(
+        "http://t", {}, "<html><body>this is a mirror of the gitlab repository</body></html>",
+    )
+    assert "GitLab" not in _names(bare)
+    via_header = fp.fingerprint_from_response(
+        "http://t", {"x-gitlab-feature-category": "projects"}, "",
+    )
+    assert "GitLab" in _names(via_header)
+
+
+def test_fingerprint_content_type_gate_skips_non_html_bodies():
+    # A JSON API response whose body contains framework substrings must NOT
+    # produce body/script detections via the crawl aggregate; an HTML body
+    # with a real marker must. (headers/cookies still apply on any type.)
+    from types import SimpleNamespace
+    fp = Fingerprinter({})
+
+    json_resp = SimpleNamespace(
+        error=None,
+        headers={"content-type": "application/json"},
+        content_type="application/json",
+        body='{"a":"data-reactroot","b":"jquery.min.js","c":"gitlab"}',
+        set_cookies=None,
+    )
+    assert {t["id"] for t in fp.fingerprint_aggregate({"http://t/api": json_resp})} == set()
+
+    html_resp = SimpleNamespace(
+        error=None,
+        headers={"content-type": "text/html"},
+        content_type="text/html; charset=utf-8",
+        body="<html><body><div data-reactroot></div></body></html>",
+        set_cookies=None,
+    )
+    assert "react" in {t["id"] for t in fp.fingerprint_aggregate({"http://t/": html_resp})}
+
+
+def test_fingerprint_springboot_requires_boot_not_bare_spring():
+    # Jenkins bundles spring-security (org.springframework.security.*) — the
+    # bare "org.springframework" marker FP'd Spring Boot on it. Require
+    # org.springframework.BOOT, or the Whitelabel error page.
+    fp = Fingerprinter({})
+    jenkins_like = fp.fingerprint_from_response(
+        "http://t", {},
+        "<html><body>org.springframework.security.web.FilterChainProxy</body></html>",
+    )
+    assert "Spring Boot" not in _names(jenkins_like)
+    real_boot = fp.fingerprint_from_response(
+        "http://t", {},
+        "<html><body>at org.springframework.boot.web.servlet.support.ErrorPageFilter</body></html>",
+    )
+    assert "Spring Boot" in _names(real_boot)
+    whitelabel = fp.fingerprint_from_response(
+        "http://t", {}, "<html><body><h1>Whitelabel Error Page</h1></body></html>",
+    )
+    assert "Spring Boot" in _names(whitelabel)
 
 
 def test_fingerprint_body_word_boundary_rejects_substring():
