@@ -281,6 +281,11 @@ class ReconModule:
 
                 elif response.status_code in (301, 302, 307, 308):
                     location = response.headers.get("location", "")
+                    # Drop catch-all "everything → login" redirects (e.g.
+                    # GitLab sends every unknown path to /users/sign_in).
+                    if baseline.is_catchall_redirect(response.status_code, location):
+                        baseline_drops += 1
+                        continue
                     found.append({
                         "url": url,
                         "path": path,
