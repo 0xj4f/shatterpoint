@@ -79,13 +79,14 @@ joomla:
 apache:
   name: "Apache HTTP Server"
   category: "Web Server"
+  # Server header only. Dropped the /server-status, /server-info and
+  # /.htaccess path probes: nginx 403s dotfiles too (so /.htaccess scored
+  # an Apache false-positive on nginx hosts like phpMyAdmin), and PHP dev
+  # servers serve .htaccess as a static 200 (Laravel lab). The Server
+  # banner is the only reliable Apache tell.
   headers:
     - header: "server"
       pattern: "(?i)apache/?([\\d.]+)?"
-  paths:
-    - "/server-status"
-    - "/server-info"
-    - "/.htaccess"
 
 nginx:
   name: "Nginx"
@@ -445,12 +446,11 @@ jenkins:
 gitlab:
   name: "GitLab"
   category: "Version Control"
-  # Dropped the bare "gitlab" body word (fired on any page mentioning
-  # GitLab). X-Gitlab-Feature-Category is a definitive GitLab response
-  # header; the _gitlab_session cookie + sign-in/api paths corroborate.
-  paths:
-    - "/users/sign_in"
-    - "/api/v4/"
+  # X-Gitlab-Feature-Category is a definitive GitLab response header; the
+  # _gitlab_session cookie + meta description corroborate. Dropped the bare
+  # "gitlab" body word AND the /users/sign_in + /api/v4/ path probes — the
+  # latter aren't GitLab-unique (Grafana 401s /api/v4/, scoring a GitLab
+  # false-positive). Header + cookie are decisive on a real GitLab.
   headers:
     - header: "x-gitlab-feature-category"
       pattern: "."

@@ -502,6 +502,53 @@ def test_fingerprint_springboot_requires_boot_not_bare_spring():
     assert "Spring Boot" in _names(whitelabel)
 
 
+def test_apache_signature_dropped_path_probes():
+    # /.htaccess + /server-status FP'd on nginx (nginx 403s dotfiles) and on
+    # PHP dev servers serving .htaccess as 200. Apache = Server banner only.
+    assert _sig("apache").get("paths", []) == []
+    assert any(h.get("header") == "server" for h in _sig("apache").get("headers", []))
+
+
+def test_gitlab_signature_dropped_path_probes():
+    # /api/v4/ + /users/sign_in aren't GitLab-unique (Grafana 401s /api/v4/).
+    assert _sig("gitlab").get("paths", []) == []
+    assert "x-gitlab-feature-category" in [
+        h.get("header") for h in _sig("gitlab").get("headers", [])
+    ]
+
+
+def _html_pages(body, headers, n):
+    from types import SimpleNamespace
+    return {
+        f"http://t/p{i}": SimpleNamespace(
+            error=None,
+            headers={"content-type": "text/html", **headers},
+            content_type="text/html",
+            set_cookies=None,
+            body=body,
+        )
+        for i in range(n)
+    }
+
+
+def test_confidence_cap_body_only_capped_at_medium():
+    # A single body marker seen across many pages must NOT inflate to HIGH on
+    # page-count alone — body/script-only detections cap at medium.
+    fp = Fingerprinter({})
+    crawl = _html_pages('<nav class="navbar-toggler"></nav>', {}, 6)
+    bs = [t for t in fp.fingerprint_aggregate(crawl) if t["id"] == "bootstrap"]
+    assert bs and bs[0]["confidence"] == "medium", bs
+
+
+def test_confidence_cap_preserves_strong_channel_high():
+    # Same page count, but via a header (strong channel) → stays HIGH; proves
+    # the cap only touches body/script-only detections.
+    fp = Fingerprinter({})
+    crawl = _html_pages("<html></html>", {"server": "nginx/1.25"}, 6)
+    ng = [t for t in fp.fingerprint_aggregate(crawl) if t["id"] == "nginx"]
+    assert ng and ng[0]["confidence"] == "high", ng
+
+
 def test_fingerprint_body_word_boundary_rejects_substring():
     fp = Fingerprinter({
         "fingerprint": {

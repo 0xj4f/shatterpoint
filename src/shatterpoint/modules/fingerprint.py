@@ -251,6 +251,14 @@ class Fingerprinter:
             else:
                 confidence = "low"
 
+            # Precision cap: a detection backed ONLY by weak content channels
+            # (body/script substrings) must not claim HIGH on page-count alone
+            # — a single content marker, however specific, is at most 'medium'.
+            # Detections with a corroborating channel (header/cookie/meta/
+            # form_field/stacktrace) or ≥2 distinct methods are unaffected.
+            if confidence == "high" and methods.issubset({"body", "script"}):
+                confidence = "medium"
+
             det["confidence"] = confidence
             # Deduplicate matched_on
             seen = set()
@@ -322,6 +330,9 @@ class Fingerprinter:
                             "name": sig.get("name", tech_id),
                             "category": sig.get("category", "Unknown"),
                             "version": None,
+                            # A single path hit is weak evidence — explicit
+                            # low (was None → rendered as a confusing [null]).
+                            "confidence": "low",
                             "matched_on": [{
                                 "method": "path_probe",
                                 "detail": f"{path} returned 200",
@@ -336,6 +347,7 @@ class Fingerprinter:
                             "name": sig.get("name", tech_id),
                             "category": sig.get("category", "Unknown"),
                             "version": None,
+                            "confidence": "low",
                             "matched_on": [{
                                 "method": "path_probe",
                                 "detail": f"{path} returned {response.status_code} (exists but protected)",
