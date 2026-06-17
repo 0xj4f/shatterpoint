@@ -58,16 +58,17 @@ drupal:
 joomla:
   name: "Joomla"
   category: "CMS"
+  # Joomla-specific signals only. REMOVED the generic dir paths
+  # /components/, /modules/, /templates/, /administrator/ — they collide
+  # with Drupal (which also has /modules/ + /templates/) and other apps,
+  # causing Joomla false-positives on Drupal/phpMyAdmin. The header,
+  # Joomla-unique paths, generator meta, and body markers are decisive.
   headers:
     - header: "x-content-encoded-by"
       pattern: "(?i)joomla"
   paths:
-    - "/administrator/"
-    - "/components/"
-    - "/modules/"
-    - "/templates/"
-    - "/configuration.php"
     - "/language/en-GB/en-GB.xml"
+    - "/administrator/manifests/files/joomla.xml"
   meta:
     - name: "generator"
       pattern: "(?i)joomla!?\\s*([\\d.]+)?"
@@ -163,15 +164,16 @@ flask:
 django:
   name: "Django"
   category: "Framework"
-  headers:
-    - header: "x-frame-options"
-      pattern: "DENY"
+  # Django-specific evidence only. REMOVED: the generic /admin/ +
+  # /static/admin/ paths (the fingerprinter follows redirects, so any
+  # app that 302s /admin/ to a 200 login — Voyager, GitLab — was
+  # falsely tagged Django and ran the Django profile) and the
+  # x-frame-options:DENY header (emitted by countless non-Django apps).
+  # csrftoken/django_language cookies + csrfmiddlewaretoken body are
+  # Django-unique; the stack-trace miner attributes Django debug pages.
   cookies:
     - "csrftoken"
     - "django_language"
-  paths:
-    - "/admin/"
-    - "/static/admin/"
   body:
     - "csrfmiddlewaretoken"
     - "__admin_media_prefix__"
@@ -231,8 +233,12 @@ laravel:
   paths:
     - "/_ignition/health-check"
   form_fields:
+    # _token is Laravel-specific (Rails uses authenticity_token, Django
+    # csrfmiddlewaretoken). _method was REMOVED — it's shared by Rails
+    # and Symfony for method spoofing, so GitLab's Rails forms were
+    # triggering the entire Laravel framework-recon profile (a 20-probe
+    # false-positive cascade observed live on the GitLab lab).
     - "_token"
-    - "_method"
   incompatible_with:
     - "rails"
     - "django"
@@ -409,13 +415,14 @@ grafana:
 jenkins:
   name: "Jenkins"
   category: "CI/CD"
+  # The X-Jenkins header is the definitive signal (present on every
+  # Jenkins response). REMOVED the generic /login path (any app with a
+  # 200 /login was being tagged Jenkins). /script + /manage redirect to
+  # /login when unauthenticated, so they add little beyond the header;
+  # kept the body marker as a secondary confirm.
   headers:
     - header: "x-jenkins"
       pattern: "([\\d.]+)"
-  paths:
-    - "/login"
-    - "/script"
-    - "/manage"
   body:
     - "Jenkins"
 

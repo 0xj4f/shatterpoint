@@ -985,6 +985,104 @@ def test_manual_pointers_present_for_each_framework():
     assert "CVE-2021-44228" in spring_text  # Log4Shell
 
 
+# ─── Precision pass: FP fixes from the VSN lab scan ───────────────────
+
+
+def _sig(name):
+    from pathlib import Path as _P
+
+    import yaml
+    return yaml.safe_load(_P("src/shatterpoint/signatures/fingerprints.yaml").read_text()).get(name, {})
+
+
+def test_django_fingerprint_has_no_generic_admin_paths():
+    """Regression: Django `/admin/` + `/static/admin/` fingerprint paths
+    caused redirect-FPs on Voyager/GitLab (the fingerprinter follows
+    redirects). Django must detect via cookies/body, not /admin paths."""
+    paths = _sig("django").get("paths", [])
+    assert paths == [], f"Django fingerprint must not carry /admin paths; got {paths}"
+    # And the weak x-frame-options:DENY header is gone
+    assert _sig("django").get("headers", []) == []
+
+
+def test_django_still_detected_via_cookies_and_body():
+    fp = Fingerprinter({
+        "fingerprint": {
+            "check_headers": True, "check_cookies": True,
+            "check_meta": True, "check_scripts": True,
+        }
+    })
+    detections = fp.fingerprint_from_response(
+        "http://dj.test/",
+        {"set-cookie": "csrftoken=abc; Path=/"},
+        '<form><input name="csrfmiddlewaretoken" value="x"></form>',
+        cookies={"csrftoken": "abc"},
+    )
+    assert "Django" in {d["name"] for d in detections}
+
+
+def test_jenkins_fingerprint_drops_generic_login_path():
+    paths = _sig("jenkins").get("paths", [])
+    assert "/login" not in paths
+    # X-Jenkins header is the definitive signal and must remain
+    hdrs = [h.get("header") for h in _sig("jenkins").get("headers", [])]
+    assert "x-jenkins" in hdrs
+
+
+def test_spring_stacktrace_requires_boot_not_bare_springframework():
+    """Bare org.springframework (e.g. Jenkins' bundled spring-security)
+    must NOT attribute Spring Boot; spring.boot / Whitelabel must."""
+    # Jenkins-like page referencing spring-security only → not Spring Boot
+    fw, _ = st_detect_framework("at org.springframework.security.web.FilterChainProxy")
+    assert fw != "Spring Boot"
+    # Real Spring Boot markers still attribute
+    assert st_detect_framework("Whitelabel Error Page")[0] == "Spring Boot"
+    assert st_detect_framework("at org.springframework.boot.SpringApplication.run")[0] == "Spring Boot"
+
+
+# ─── Redirect-baseline (catch-all → login) ────────────────────────────
+
+
+def test_baseline_is_catchall_redirect():
+    from shatterpoint.utils.baseline import Baseline
+
+    b = Baseline(available=True, status_code=302, body_hash="", body_length=0,
+                 redirect_location="/users/sign_in")
+    # Same login target (absolute or relative) → catch-all, drop
+    assert b.is_catchall_redirect(302, "/users/sign_in") is True
+    assert b.is_catchall_redirect(302, "http://gitlab.test/users/sign_in") is True
+    # Different target → a real redirect, keep
+    assert b.is_catchall_redirect(302, "/admin/") is False
+    # Non-redirect status → not applicable
+    assert b.is_catchall_redirect(200, "/users/sign_in") is False
+    # No redirect baseline captured → never a catch-all
+    b2 = Baseline(available=True, status_code=404, body_hash="", body_length=0)
+    assert b2.is_catchall_redirect(302, "/users/sign_in") is False
+
+
+def test_framework_recon_drops_catchall_login_redirects():
+    """Integration: a GitLab-style target that 302s every path to
+    /users/sign_in must yield ZERO framework-recon findings even if a
+    profile is (mistakenly) triggered."""
+    import asyncio
+
+    import httpx
+
+    from shatterpoint.modules.framework_recon import FrameworkRecon
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        # Everything → 302 /users/sign_in (the bogus baseline path too)
+        return httpx.Response(302, headers={"location": "/users/sign_in"})
+
+    async def go():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            fr = FrameworkRecon({"framework_recon": {"enabled": True}}, URLValidator("http://gl.test"))
+            return await fr.analyze(client, "http://gl.test", [{"id": "laravel"}])
+
+    result = asyncio.run(go())
+    assert result["probes"] == [], f"catch-all login redirects must be dropped, got {result['probes']}"
+
+
 # ─── Voyager / Innoshop product CVE detection ─────────────────────────
 
 
@@ -1237,8 +1335,10 @@ def test_grafana_does_not_fire_on_login_alone():
     assert "/api/datasources" in grafana_paths  # new Grafana-specific probe
 
 
-def test_laravel_signature_has_form_fields():
-    """Laravel sig should now include _token / _method form fields."""
+def test_laravel_signature_form_fields_token_only():
+    """Laravel sig keeps the Laravel-specific `_token` form field but NOT
+    `_method` — `_method` is shared by Rails/Symfony and was triggering a
+    false-positive Laravel-profile cascade on GitLab (a Rails app)."""
     fp = Fingerprinter({
         "fingerprint": {
             "check_headers": True, "check_cookies": True,
@@ -1247,7 +1347,29 @@ def test_laravel_signature_has_form_fields():
     })
     laravel_form_fields = fp.signatures.get("laravel", {}).get("form_fields", [])
     assert "_token" in laravel_form_fields
-    assert "_method" in laravel_form_fields
+    assert "_method" not in laravel_form_fields
+
+
+def test_laravel_does_not_fire_on_rails_method_field():
+    """Regression (GitLab cascade): a Rails form with `_method` +
+    `authenticity_token` must NOT fingerprint as Laravel."""
+    fp = Fingerprinter({
+        "fingerprint": {
+            "check_headers": True, "check_cookies": True,
+            "check_meta": True, "check_scripts": True,
+        }
+    })
+    forms = [{
+        "found_on": "http://gitlab.test/",
+        "inputs": [
+            {"name": "_method", "type": "hidden", "tag": "input"},
+            {"name": "authenticity_token", "type": "hidden", "tag": "input"},
+        ],
+    }]
+    detections = fp.fingerprint_from_response(
+        "http://gitlab.test/", {}, "<html>GitLab</html>", cookies=None, forms=forms,
+    )
+    assert "Laravel" not in {d["name"] for d in detections}
 
 
 def test_laravel_signature_declares_conflicts():

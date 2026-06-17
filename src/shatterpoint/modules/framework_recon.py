@@ -459,8 +459,17 @@ class FrameworkRecon:
         body = response.text or ""
         body_lower = body.lower()
 
-        # Catch-all baseline filter — only meaningful on 200s.
+        # Catch-all content baseline — only meaningful on 200s.
         if response.status_code == 200 and baseline.matches(response.status_code, body):
+            return None
+
+        # Catch-all redirect baseline — a 3xx to the same place a bogus
+        # path redirects to (e.g. GitLab → /users/sign_in) is the app's
+        # "everything → login" handler, not a real finding. Without this,
+        # a mis-triggered profile floods criticals on redirect-heavy apps.
+        if response.is_redirect and baseline.is_catchall_redirect(
+            response.status_code, response.headers.get("location")
+        ):
             return None
 
         # Only report status codes that meaningfully indicate presence.

@@ -80,10 +80,16 @@ _FLASK_MARKERS = [
 ]
 _WERKZEUG_VERSION = re.compile(r'Werkzeug/(\d+\.\d+(?:\.\d+)?)', re.IGNORECASE)
 
+# Spring BOOT-specific markers. Bare `org.springframework.` is too broad —
+# Jenkins (and many Java apps) bundle spring-security, so the namespace
+# appears without the app being Spring Boot (observed: a Jenkins page
+# falsely attributed to Spring Boot). Require the Whitelabel error page,
+# a spring-boot stack frame, or the Spring MVC DispatcherServlet.
 _SPRING_MARKERS = [
     re.compile(r'Whitelabel Error Page', re.IGNORECASE),
-    re.compile(r'\bat org\.springframework\.'),
-    re.compile(r'\borg\.springframework\.\w'),
+    re.compile(r'\bat org\.springframework\.boot\.'),
+    re.compile(r'\borg\.springframework\.boot\.'),
+    re.compile(r'\borg\.springframework\.web\.servlet\.DispatcherServlet'),
 ]
 
 # ─── Ignition (Laravel debug handler) ─────────────────────────────────
