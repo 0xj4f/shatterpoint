@@ -125,11 +125,13 @@ tomcat:
   headers:
     - header: "server"
       pattern: "(?i)apache[- ]coyote/?([\\d.]+)?"
+  # Tomcat-Manager paths are Tomcat-unique. Dropped /docs/ + /examples/:
+  # they're generic (Cacti and many apps ship a /docs/ dir → a Tomcat
+  # false-positive). The Apache-Coyote Server header + "Apache Tomcat" body
+  # are the definitive tells; the manager paths corroborate.
   paths:
     - "/manager/html"
     - "/host-manager/html"
-    - "/docs/"
-    - "/examples/"
     - "/WEB-INF/"
   body:
     - "Apache Tomcat"

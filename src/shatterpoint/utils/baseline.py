@@ -102,13 +102,25 @@ async def fetch_baseline(client: httpx.AsyncClient, base_url: str) -> Baseline:
     """
     token = secrets.token_hex(16)
     probe_url = f"{base_url.rstrip('/')}/__shatterpoint_baseline_{token}__"
+    import asyncio
+
     import httpx as _httpx  # local import keeps this module test-friendly
-    try:
-        # First hop WITHOUT following — reveals a catch-all 3xx location.
-        immediate = await client.get(
-            probe_url, follow_redirects=False, timeout=_httpx.Timeout(8),
-        )
-    except Exception:
+    # The baseline gates the entire catch-all filter — one transient failure
+    # (a slow/warming target) would silently disable path-probe filtering and
+    # unleash a false-positive cascade on a catch-all host. Retry a few times
+    # before giving up so a single hiccup doesn't poison the whole scan.
+    immediate = None
+    for attempt in range(3):
+        try:
+            # First hop WITHOUT following — reveals a catch-all 3xx location.
+            immediate = await client.get(
+                probe_url, follow_redirects=False, timeout=_httpx.Timeout(8),
+            )
+            break
+        except Exception:
+            if attempt < 2:
+                await asyncio.sleep(0.6)
+    if immediate is None:
         return Baseline(available=False, status_code=0, body_hash="", body_length=0)
 
     redirect_location = None

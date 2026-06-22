@@ -360,6 +360,21 @@ class Fingerprinter:
         if baseline_drops:
             print_status(f"Dropped {baseline_drops} fingerprint probe(s) matching the 404 baseline")
 
+        # Catch-all guard (defense-in-depth, independent of the baseline): a
+        # real host does not legitimately match several unrelated tech-specific
+        # path sets. If ≥4 distinct technologies were "found" by path alone, the
+        # server is answering every path (catch-all / permissive 200s — e.g.
+        # when the baseline fetch failed on a slow host) → suppress these
+        # path-probe detections. The real product still surfaces via its
+        # body/header/meta/cookie signals in the later phases.
+        distinct = {d["id"] for d in detections}
+        if len(distinct) >= 4:
+            print_status(
+                f"Catch-all server suspected — {len(distinct)} technologies matched "
+                "by path alone; suppressing path-probe detections (precision guard)"
+            )
+            return []
+
         return detections
 
     def _check_signature(

@@ -517,6 +517,88 @@ def test_gitlab_signature_dropped_path_probes():
     ]
 
 
+def test_tomcat_signature_dropped_generic_paths():
+    # /docs/ + /examples/ aren't Tomcat-unique (Cacti ships a /docs/ dir →
+    # a Tomcat false-positive). Manager paths + "Apache Tomcat" body remain.
+    paths = _sig("tomcat").get("paths", [])
+    assert "/docs/" not in paths and "/examples/" not in paths
+    assert "/manager/html" in paths
+    assert any("Apache Tomcat" in b for b in _sig("tomcat").get("body", []))
+
+
+def test_probe_known_paths_catchall_suppressed():
+    # A catch-all server (every path → 200) with a FAILED baseline would
+    # otherwise produce a path-probe FP cascade. The catch-all heuristic must
+    # suppress: ≥4 unrelated techs matched by path alone → drop them all.
+    import asyncio
+
+    import httpx
+
+    from shatterpoint.utils.baseline import Baseline
+    fp = Fingerprinter({})
+
+    def handler(request):
+        return httpx.Response(200, text="<html>home</html>")  # answers everything
+
+    async def go():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
+            # baseline unavailable (simulating the transient fetch failure) →
+            # no baseline drop; the heuristic must still catch it.
+            b = Baseline(available=False, status_code=0, body_hash="", body_length=0)
+            return await fp.probe_known_paths(c, "http://t", baseline=b)
+
+    dets = asyncio.run(go())
+    assert dets == [], f"catch-all not suppressed: {[d['id'] for d in dets]}"
+
+
+def test_probe_known_paths_single_tech_not_suppressed():
+    # Control: only WordPress paths 200 → 1 tech → heuristic must NOT fire.
+    import asyncio
+
+    import httpx
+
+    from shatterpoint.utils.baseline import Baseline
+    fp = Fingerprinter({})
+
+    def handler(request):
+        p = request.url.path
+        if p.startswith("/wp-") or p == "/xmlrpc.php":
+            return httpx.Response(200, text="<html>wp</html>")
+        return httpx.Response(404, text="nope")
+
+    async def go():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
+            b = Baseline(available=False, status_code=0, body_hash="", body_length=0)
+            return await fp.probe_known_paths(c, "http://t", baseline=b)
+
+    ids = {d["id"] for d in asyncio.run(go())}
+    assert "wordpress" in ids and len(ids) < 4, ids
+
+
+def test_fetch_baseline_retries_transient_failure():
+    # One transient connect error must NOT make the baseline unavailable (that
+    # would disable the whole catch-all filter). Retry then succeed.
+    import asyncio
+
+    import httpx
+
+    from shatterpoint.utils.baseline import fetch_baseline
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise httpx.ConnectError("transient")
+        return httpx.Response(200, text="ok")
+
+    async def go():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
+            return await fetch_baseline(c, "http://t")
+
+    b = asyncio.run(go())
+    assert b.available is True and calls["n"] >= 3, (b.available, calls["n"])
+
+
 def _html_pages(body, headers, n):
     from types import SimpleNamespace
     return {
