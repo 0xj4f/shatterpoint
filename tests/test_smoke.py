@@ -599,6 +599,77 @@ def test_fetch_baseline_retries_transient_failure():
     assert b.available is True and calls["n"] >= 3, (b.available, calls["n"])
 
 
+def test_new_product_signatures_detect_via_markers():
+    # The batch-2 depth additions: each product must be NAMED via its FP-safe
+    # marker (definitive header/cookie, or a specific title/body string).
+    fp = Fingerprinter({})
+    cases = [
+        ("Webmin", {"server": "MiniServ/1.920"}, "", None),
+        ("Apache CouchDB", {"server": "CouchDB/3.3 (Erlang OTP/24)"}, "", None),
+        ("Strapi", {"x-powered-by": "Strapi <strapi.io>"}, "", None),
+        ("Atlassian Confluence", {"x-confluence-request-time": "1"}, "", None),
+        ("Craft CMS", {"x-powered-by": "Craft CMS"}, "", None),
+        ("Bludit", {"x-powered-by": "Bludit"}, "", None),
+        ("ThinkPHP", {}, "<html><body>built on ThinkPHP</body></html>", None),
+        ("Nagios XI", {}, "<title>Nagios XI</title>", None),
+        ("Cacti", {}, "", {"Cacti": "abc"}),
+        ("OpenNetAdmin", {}, "", {"ona_context_name": "DEFAULT"}),
+    ]
+    for name, headers, body, cookies in cases:
+        names = _names(fp.fingerprint_from_response("http://t", headers, body, cookies))
+        assert name in names, (name, names)
+
+
+def test_framework_recon_fingerprint_only_profiles_have_manual_pointers():
+    # Every fingerprint-only profile (empty probe list) must carry a manual
+    # CVE pointer — that's the whole point of registering it (signal-only
+    # "take a look"), and it keeps _PROFILES / _MANUAL_POINTERS in sync.
+    from shatterpoint.modules.framework_recon import _MANUAL_POINTERS, _PROFILES
+    for fid, probes in _PROFILES.items():
+        if not probes:
+            assert fid in _MANUAL_POINTERS, f"{fid} profile has no manual CVE pointer"
+
+
+def test_paths_200_only_detects_when_reachable():
+    # paths_200 (exploit-file presence): a 200 (reachable → vulnerable) detects;
+    # a 403 (blocked, e.g. Drupal .htaccess over /vendor) must NOT — that would
+    # be a false CVE-2017-9841 lead.
+    import asyncio
+
+    import httpx
+
+    from shatterpoint.utils.baseline import Baseline
+    fp = Fingerprinter({})
+    evalpath = "/vendor/phpunit/phpunit/src/Util/PHP/eval-stdin.php"
+
+    def make(code):
+        def handler(request):
+            return httpx.Response(code if request.url.path == evalpath else 404, text="x")
+        return handler
+
+    async def run(code):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(make(code))) as c:
+            b = Baseline(available=True, status_code=404, body_hash="zz", body_length=1)
+            return await fp.probe_known_paths(c, "http://t", baseline=b)
+
+    assert "phpunit" in {d["id"] for d in asyncio.run(run(200))}
+    assert "phpunit" not in {d["id"] for d in asyncio.run(run(403))}
+
+
+def test_batch3_product_signatures_detect():
+    fp = Fingerprinter({})
+    cases = [
+        ("Gitea", {}, "", {"i_like_gitea": "x"}),
+        ("MinIO", {"server": "MinIO"}, "", None),
+        ("Apache Flink", {}, "<title>Apache Flink Web Dashboard</title>", None),
+        ("GLPI", {}, "<title>Setup GLPI</title>", None),
+        ("Apache Superset", {}, '<script>{"SUPERSET_WEBSERVER_TIMEOUT":60}</script>', None),
+    ]
+    for name, headers, body, cookies in cases:
+        names = _names(fp.fingerprint_from_response("http://t", headers, body, cookies))
+        assert name in names, (name, names)
+
+
 def _html_pages(body, headers, n):
     from types import SimpleNamespace
     return {
@@ -1603,21 +1674,33 @@ def test_rails_still_fires_on_real_rails_evidence():
     assert "Ruby on Rails" in names
 
 
-def test_grafana_does_not_fire_on_login_alone():
-    """Regression: Grafana sig used to include `/login` in its paths list,
-    producing false-positives on every framework that exposes /login."""
-    # Path-probe behaviour: we can't easily simulate this without httpx,
-    # but the YAML edit removed /login from grafana.paths. Confirm via
-    # signature inspection.
-    fp = Fingerprinter({
-        "fingerprint": {
-            "check_headers": True, "check_cookies": True,
-            "check_meta": True, "check_scripts": True,
-        }
-    })
-    grafana_paths = fp.signatures.get("grafana", {}).get("paths", [])
-    assert "/login" not in grafana_paths
-    assert "/api/datasources" in grafana_paths  # new Grafana-specific probe
+def test_grafana_detected_by_strong_signals_no_path_probes():
+    """Grafana is detected by its definitive header / cookie / body only.
+    ALL path probes were removed: `/login` false-fired on every app with a
+    login, and `/api/health` + `/api/datasources` collided with any app
+    exposing an /api/* health endpoint (Metabase, ActiveMQ → a Grafana
+    false-positive)."""
+    fp = Fingerprinter({})
+    g = fp.signatures.get("grafana", {})
+    assert g.get("paths", []) == [], "grafana must have no path probes"
+    assert any(h.get("header") == "x-grafana-org-id" for h in g.get("headers", []))
+    assert "grafana_session" in g.get("cookies", [])
+    # still detects a real Grafana via its definitive header
+    assert "Grafana" in _names(fp.fingerprint_from_response("http://t", {"x-grafana-org-id": "1"}, ""))
+
+
+def test_batch6_precision_and_detection():
+    fp = Fingerprinter({})
+    # confluence: the bare word "Confluence" in body (a doc link) must NOT fire;
+    # the definitive X-Confluence-Request-Time header must.
+    assert "Atlassian Confluence" not in _names(
+        fp.fingerprint_from_response("http://t", {}, "<a href='x'>Confluence docs</a>"))
+    assert "Atlassian Confluence" in _names(
+        fp.fingerprint_from_response("http://t", {"x-confluence-request-time": "1"}, ""))
+    # new Java products
+    assert "Metabase" in _names(fp.fingerprint_from_response("http://t", {}, "", {"metabase.DEVICE": "x"}))
+    assert "Apache Solr" in _names(fp.fingerprint_from_response("http://t", {}, "<title>Solr Admin</title>"))
+    assert "Apache ActiveMQ" in _names(fp.fingerprint_from_response("http://t", {}, "<h1>Apache ActiveMQ</h1>"))
 
 
 def test_laravel_signature_form_fields_token_only():

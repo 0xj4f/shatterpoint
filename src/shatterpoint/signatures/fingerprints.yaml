@@ -407,21 +407,22 @@ phpmyadmin:
 webmin:
   name: "Webmin"
   category: "Admin Panel"
-  paths:
-    - ":10000"
+  # MiniServ is Webmin's bespoke HTTP server — a definitive, FP-safe tell.
+  # (Dropped the bogus ":10000" path: probe_known_paths concatenates it onto
+  # base_url into a malformed URL, and the port already comes from -u.)
+  headers:
+    - header: "server"
+      pattern: "(?i)miniserv/?([\\d.]+)?"
   body:
     - "Webmin"
 
 grafana:
   name: "Grafana"
   category: "Monitoring"
-  # Grafana-specific paths only. `/login` was producing false positives
-  # on every framework that ships an auth scaffold (Laravel, Rails,
-  # Django, Spring Security, …).
-  paths:
-    - "/api/health"
-    - "/api/datasources"
-    - "/public/build/runtime"
+  # Header + cookie + body only. Dropped the path probes — /api/health and
+  # /api/datasources collide with any app exposing an /api/* health endpoint
+  # (Metabase, ActiveMQ → a Grafana false-positive). Grafana's own signals
+  # below are decisive.
   headers:
     - header: "x-grafana-org-id"
       pattern: "."
@@ -461,3 +462,207 @@ gitlab:
   meta:
     - name: "description"
       pattern: "(?i)gitlab"
+
+# ── Standalone products / apps (header- or marker-based; FP-safe) ──────
+# Each names the product so the operator gets a real identification, and
+# framework-recon surfaces its famous CVE as a "verify manually" pointer.
+
+opennetadmin:
+  name: "OpenNetAdmin"
+  category: "IPAM"
+  cookies:
+    - "ona_context_name"
+  body:
+    - "OpenNetAdmin"
+
+cacti:
+  name: "Cacti"
+  category: "Monitoring"
+  cookies:
+    - "Cacti"
+  body:
+    - "Login to Cacti"
+
+craftcms:
+  name: "Craft CMS"
+  category: "CMS"
+  headers:
+    - header: "x-powered-by"
+      pattern: "(?i)craft cms"
+  body:
+    - "Craft CMS"
+
+bludit:
+  name: "Bludit"
+  category: "CMS"
+  headers:
+    - header: "x-powered-by"
+      pattern: "(?i)bludit"
+  body:
+    - "BLUDIT"
+
+thinkphp:
+  name: "ThinkPHP"
+  category: "Framework"
+  body:
+    - "ThinkPHP"
+
+couchdb:
+  name: "Apache CouchDB"
+  category: "Database"
+  headers:
+    - header: "server"
+      pattern: "(?i)couchdb/?([\\d.]+)?"
+
+confluence:
+  name: "Atlassian Confluence"
+  category: "Wiki"
+  # X-Confluence-Request-Time is definitive and on every Confluence response.
+  # Dropped the body "Confluence" marker — the bare word appears in unrelated
+  # apps' doc links (e.g. the Struts2 showcase) → false positive.
+  headers:
+    - header: "x-confluence-request-time"
+      pattern: "."
+
+nagiosxi:
+  name: "Nagios XI"
+  category: "Monitoring"
+  body:
+    - "Nagios XI"
+
+strapi:
+  name: "Strapi"
+  category: "Headless CMS"
+  headers:
+    - header: "x-powered-by"
+      pattern: "(?i)strapi"
+
+glpi:
+  name: "GLPI"
+  category: "IT Asset Management"
+  body:
+    - "GLPI"
+
+phpunit:
+  name: "PHPUnit"
+  category: "Dev Dependency"
+  # CVE-2017-9841: only a REACHABLE (200) eval-stdin.php is exploitable, so use
+  # paths_200 — a blocked 403 (Drupal ships phpunit in /vendor but .htaccess
+  # denies it) must NOT produce a lead. No body marker: "PHPUnit" is name-
+  # dropped in composer/status pages of unrelated PHP apps (Drupal included).
+  paths_200:
+    - "/vendor/phpunit/phpunit/src/Util/PHP/eval-stdin.php"
+
+superset:
+  name: "Apache Superset"
+  category: "Analytics"
+  # SUPERSET_WEBSERVER_TIMEOUT is a Superset bootstrap config constant —
+  # unique + a complete token (the bare word "superset" would false-fire on
+  # prose, and "SUPERSET_WEBSERVER" fails the word boundary before its "_").
+  body:
+    - "SUPERSET_WEBSERVER_TIMEOUT"
+
+gitea:
+  name: "Gitea"
+  category: "Version Control"
+  cookies:
+    - "i_like_gitea"
+  body:
+    - "Gitea"
+
+minio:
+  name: "MinIO"
+  category: "Object Storage"
+  headers:
+    - header: "server"
+      pattern: "(?i)minio"
+
+flink:
+  name: "Apache Flink"
+  category: "Stream Processing"
+  body:
+    - "Apache Flink"
+
+nodered:
+  name: "Node-RED"
+  category: "Flow Automation"
+  body:
+    - "Node-RED"
+
+nexus:
+  name: "Sonatype Nexus Repository"
+  category: "Artifact Repository"
+  headers:
+    - header: "server"
+      pattern: "(?i)nexus/?([\\d.]+)?"
+
+pimcore:
+  name: "Pimcore"
+  category: "CMS"
+  headers:
+    - header: "x-powered-by"
+      pattern: "(?i)pimcore"
+
+octobercms:
+  name: "October CMS"
+  category: "CMS"
+  cookies:
+    - "october_session"
+
+druid:
+  name: "Apache Druid"
+  category: "Analytics"
+  body:
+    - "Apache Druid"
+
+grav:
+  name: "Grav CMS"
+  category: "CMS"
+  body:
+    - "getgrav"
+    - "Grav"
+
+kibana:
+  name: "Kibana"
+  category: "Analytics"
+  headers:
+    - header: "kbn-version"
+      pattern: "([\\d.]+)"
+    - header: "kbn-name"
+      pattern: "."
+
+limesurvey:
+  name: "LimeSurvey"
+  category: "Survey"
+  body:
+    - "LimeSurvey"
+
+mybb:
+  name: "MyBB"
+  category: "Forum"
+  body:
+    - "MyBB"
+
+solr:
+  name: "Apache Solr"
+  category: "Search"
+  body:
+    - "Solr Admin"
+
+metabase:
+  name: "Metabase"
+  category: "Analytics"
+  cookies:
+    - "metabase.DEVICE"
+
+activemq:
+  name: "Apache ActiveMQ"
+  category: "Message Broker"
+  body:
+    - "Apache ActiveMQ"
+
+gerapy:
+  name: "Gerapy"
+  category: "Scrapy GUI"
+  body:
+    - "Gerapy"

@@ -357,6 +357,43 @@ class Fingerprinter:
                 except Exception:
                     pass
 
+            # paths_200: "exploit file reachable" checks that only count as a
+            # finding when the file is actually REACHABLE (200). A 403/404 means
+            # blocked or absent — NOT vulnerable — so it must not produce a lead
+            # (e.g. Drupal ships phpunit in /vendor but .htaccess 403s
+            # eval-stdin.php, which would be a false CVE-2017-9841 signal).
+            for path in sig.get("paths_200", []):
+                if path in probed_paths:
+                    continue
+                probed_paths.add(path)
+                url = f"{base_url.rstrip('/')}{path}"
+                try:
+                    response = await client.get(
+                        url, follow_redirects=True, timeout=httpx.Timeout(5),
+                    )
+                    if response.status_code == 200:
+                        body = response.text or ""
+                        if baseline.matches(response.status_code, body):
+                            baseline_drops += 1
+                            continue
+                        detections.append({
+                            "id": tech_id,
+                            "name": sig.get("name", tech_id),
+                            "category": sig.get("category", "Unknown"),
+                            "version": None,
+                            "confidence": "low",
+                            "matched_on": [{
+                                "method": "path_probe",
+                                "detail": f"{path} reachable (200) — exploit file exposed",
+                            }],
+                        })
+                        print_finding(
+                            "Fingerprint",
+                            f"Found {sig.get('name', tech_id)} via reachable {path}",
+                        )
+                except Exception:
+                    pass
+
         if baseline_drops:
             print_status(f"Dropped {baseline_drops} fingerprint probe(s) matching the 404 baseline")
 
