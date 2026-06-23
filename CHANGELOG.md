@@ -9,7 +9,7 @@ Version numbers are produced at release time from the GitHub Actions
 `MAJOR_VERSION` and `MINOR_VERSION` variables; the patch component
 auto-increments. See [README — Release process](README.md) for details.
 
-## [Unreleased]
+## [1.2.0] - 2026-06-23
 
 ### Added
 - **Detection + signal-only CVE pointer for Gerapy** (VSN depth, batch 7): CVE-2021-43857. (Batch 7 otherwise re-verified existing detections — Apache, Django, Flask, GitLab, Grafana, Rails, Tomcat — all correct; Apache OFBiz forces HTTPS and is left as a known gap.)
