@@ -378,23 +378,328 @@ def test_security_headers_empty_when_none_present():
 # ─── Fingerprint body matching tests ──────────────────────────────────
 
 
-def test_fingerprint_body_word_boundary_matches_standalone():
-    fp = Fingerprinter({
-        "fingerprint": {
-            "check_headers": True,
-            "check_cookies": True,
-            "check_meta": True,
-            "check_scripts": True,
-        }
-    })
-    # Standalone "react" token in body → should fire React detection
-    detections = fp.fingerprint_from_response(
-        "http://test.com",
-        {},
+def _names(detections):
+    return {d["name"] for d in detections}
+
+
+def test_fingerprint_react_requires_real_marker_not_bare_substring():
+    # Precision-first: a bare "react" token in a script/body must NOT fire
+    # React (it appears in any bundle referencing react.*); a real React
+    # DOM-root marker must.
+    fp = Fingerprinter({})
+    bare = fp.fingerprint_from_response(
+        "http://t", {},
         '<html><body><script>var react = require("react");</script></body></html>',
     )
-    names = {d["name"] for d in detections}
-    assert "React" in names
+    assert "React" not in _names(bare)
+    real = fp.fingerprint_from_response(
+        "http://t", {}, '<html><body><div id="root" data-reactroot=""></div></body></html>',
+    )
+    assert "React" in _names(real)
+
+
+def test_fingerprint_vue_requires_real_marker_not_bare_substring():
+    fp = Fingerprinter({})
+    bare = fp.fingerprint_from_response(
+        "http://t", {}, "<html><body><!-- built with Vue.js --></body></html>",
+    )
+    assert "Vue.js" not in _names(bare)
+    real = fp.fingerprint_from_response(
+        "http://t", {}, "<html><body><div data-v-app></div><span v-cloak></span></body></html>",
+    )
+    assert "Vue.js" in _names(real)
+
+
+def test_fingerprint_jquery_requires_script_src_not_bare_word():
+    fp = Fingerprinter({})
+    bare = fp.fingerprint_from_response(
+        "http://t", {}, "<html><body><script>jquery.fn.extend({});</script></body></html>",
+    )
+    assert "jQuery" not in _names(bare)
+    # Real <script src> includes — WordPress (?ver=), Drupal (?v=), CDN forms
+    for src in (
+        "/wp-includes/js/jquery/jquery.min.js?ver=3.5.1",
+        "/core/assets/vendor/jquery/jquery.min.js?v=3.2.1",
+        "https://code.jquery.com/jquery-3.6.0.min.js",
+    ):
+        det = fp.fingerprint_from_response(
+            "http://t", {}, f'<html><head><script src="{src}"></script></head></html>',
+        )
+        assert "jQuery" in _names(det), src
+
+
+def test_fingerprint_jenkins_not_from_bare_word_but_header_or_crumb():
+    fp = Fingerprinter({})
+    # A page merely naming Jenkins (e.g. GitLab's CI-integration label) → no FP
+    bare = fp.fingerprint_from_response(
+        "http://t", {}, "<html><body>Configure your Jenkins server URL here</body></html>",
+    )
+    assert "Jenkins" not in _names(bare)
+    via_header = fp.fingerprint_from_response("http://t", {"x-jenkins": "2.441"}, "")
+    assert "Jenkins" in _names(via_header)
+    via_crumb = fp.fingerprint_from_response(
+        "http://t", {}, '<html><body><div data-crumb-header="Jenkins-Crumb"></div></body></html>',
+    )
+    assert "Jenkins" in _names(via_crumb)
+
+
+def test_fingerprint_gitlab_not_from_bare_word_but_header():
+    fp = Fingerprinter({})
+    bare = fp.fingerprint_from_response(
+        "http://t", {}, "<html><body>this is a mirror of the gitlab repository</body></html>",
+    )
+    assert "GitLab" not in _names(bare)
+    via_header = fp.fingerprint_from_response(
+        "http://t", {"x-gitlab-feature-category": "projects"}, "",
+    )
+    assert "GitLab" in _names(via_header)
+
+
+def test_fingerprint_content_type_gate_skips_non_html_bodies():
+    # A JSON API response whose body contains framework substrings must NOT
+    # produce body/script detections via the crawl aggregate; an HTML body
+    # with a real marker must. (headers/cookies still apply on any type.)
+    from types import SimpleNamespace
+    fp = Fingerprinter({})
+
+    json_resp = SimpleNamespace(
+        error=None,
+        headers={"content-type": "application/json"},
+        content_type="application/json",
+        body='{"a":"data-reactroot","b":"jquery.min.js","c":"gitlab"}',
+        set_cookies=None,
+    )
+    assert {t["id"] for t in fp.fingerprint_aggregate({"http://t/api": json_resp})} == set()
+
+    html_resp = SimpleNamespace(
+        error=None,
+        headers={"content-type": "text/html"},
+        content_type="text/html; charset=utf-8",
+        body="<html><body><div data-reactroot></div></body></html>",
+        set_cookies=None,
+    )
+    assert "react" in {t["id"] for t in fp.fingerprint_aggregate({"http://t/": html_resp})}
+
+
+def test_fingerprint_springboot_requires_boot_not_bare_spring():
+    # Jenkins bundles spring-security (org.springframework.security.*) — the
+    # bare "org.springframework" marker FP'd Spring Boot on it. Require
+    # org.springframework.BOOT, or the Whitelabel error page.
+    fp = Fingerprinter({})
+    jenkins_like = fp.fingerprint_from_response(
+        "http://t", {},
+        "<html><body>org.springframework.security.web.FilterChainProxy</body></html>",
+    )
+    assert "Spring Boot" not in _names(jenkins_like)
+    real_boot = fp.fingerprint_from_response(
+        "http://t", {},
+        "<html><body>at org.springframework.boot.web.servlet.support.ErrorPageFilter</body></html>",
+    )
+    assert "Spring Boot" in _names(real_boot)
+    whitelabel = fp.fingerprint_from_response(
+        "http://t", {}, "<html><body><h1>Whitelabel Error Page</h1></body></html>",
+    )
+    assert "Spring Boot" in _names(whitelabel)
+
+
+def test_apache_signature_dropped_path_probes():
+    # /.htaccess + /server-status FP'd on nginx (nginx 403s dotfiles) and on
+    # PHP dev servers serving .htaccess as 200. Apache = Server banner only.
+    assert _sig("apache").get("paths", []) == []
+    assert any(h.get("header") == "server" for h in _sig("apache").get("headers", []))
+
+
+def test_gitlab_signature_dropped_path_probes():
+    # /api/v4/ + /users/sign_in aren't GitLab-unique (Grafana 401s /api/v4/).
+    assert _sig("gitlab").get("paths", []) == []
+    assert "x-gitlab-feature-category" in [
+        h.get("header") for h in _sig("gitlab").get("headers", [])
+    ]
+
+
+def test_tomcat_signature_dropped_generic_paths():
+    # /docs/ + /examples/ aren't Tomcat-unique (Cacti ships a /docs/ dir →
+    # a Tomcat false-positive). Manager paths + "Apache Tomcat" body remain.
+    paths = _sig("tomcat").get("paths", [])
+    assert "/docs/" not in paths and "/examples/" not in paths
+    assert "/manager/html" in paths
+    assert any("Apache Tomcat" in b for b in _sig("tomcat").get("body", []))
+
+
+def test_probe_known_paths_catchall_suppressed():
+    # A catch-all server (every path → 200) with a FAILED baseline would
+    # otherwise produce a path-probe FP cascade. The catch-all heuristic must
+    # suppress: ≥4 unrelated techs matched by path alone → drop them all.
+    import asyncio
+
+    import httpx
+
+    from shatterpoint.utils.baseline import Baseline
+    fp = Fingerprinter({})
+
+    def handler(request):
+        return httpx.Response(200, text="<html>home</html>")  # answers everything
+
+    async def go():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
+            # baseline unavailable (simulating the transient fetch failure) →
+            # no baseline drop; the heuristic must still catch it.
+            b = Baseline(available=False, status_code=0, body_hash="", body_length=0)
+            return await fp.probe_known_paths(c, "http://t", baseline=b)
+
+    dets = asyncio.run(go())
+    assert dets == [], f"catch-all not suppressed: {[d['id'] for d in dets]}"
+
+
+def test_probe_known_paths_single_tech_not_suppressed():
+    # Control: only WordPress paths 200 → 1 tech → heuristic must NOT fire.
+    import asyncio
+
+    import httpx
+
+    from shatterpoint.utils.baseline import Baseline
+    fp = Fingerprinter({})
+
+    def handler(request):
+        p = request.url.path
+        if p.startswith("/wp-") or p == "/xmlrpc.php":
+            return httpx.Response(200, text="<html>wp</html>")
+        return httpx.Response(404, text="nope")
+
+    async def go():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
+            b = Baseline(available=False, status_code=0, body_hash="", body_length=0)
+            return await fp.probe_known_paths(c, "http://t", baseline=b)
+
+    ids = {d["id"] for d in asyncio.run(go())}
+    assert "wordpress" in ids and len(ids) < 4, ids
+
+
+def test_fetch_baseline_retries_transient_failure():
+    # One transient connect error must NOT make the baseline unavailable (that
+    # would disable the whole catch-all filter). Retry then succeed.
+    import asyncio
+
+    import httpx
+
+    from shatterpoint.utils.baseline import fetch_baseline
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise httpx.ConnectError("transient")
+        return httpx.Response(200, text="ok")
+
+    async def go():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
+            return await fetch_baseline(c, "http://t")
+
+    b = asyncio.run(go())
+    assert b.available is True and calls["n"] >= 3, (b.available, calls["n"])
+
+
+def test_new_product_signatures_detect_via_markers():
+    # The batch-2 depth additions: each product must be NAMED via its FP-safe
+    # marker (definitive header/cookie, or a specific title/body string).
+    fp = Fingerprinter({})
+    cases = [
+        ("Webmin", {"server": "MiniServ/1.920"}, "", None),
+        ("Apache CouchDB", {"server": "CouchDB/3.3 (Erlang OTP/24)"}, "", None),
+        ("Strapi", {"x-powered-by": "Strapi <strapi.io>"}, "", None),
+        ("Atlassian Confluence", {"x-confluence-request-time": "1"}, "", None),
+        ("Craft CMS", {"x-powered-by": "Craft CMS"}, "", None),
+        ("Bludit", {"x-powered-by": "Bludit"}, "", None),
+        ("ThinkPHP", {}, "<html><body>built on ThinkPHP</body></html>", None),
+        ("Nagios XI", {}, "<title>Nagios XI</title>", None),
+        ("Cacti", {}, "", {"Cacti": "abc"}),
+        ("OpenNetAdmin", {}, "", {"ona_context_name": "DEFAULT"}),
+    ]
+    for name, headers, body, cookies in cases:
+        names = _names(fp.fingerprint_from_response("http://t", headers, body, cookies))
+        assert name in names, (name, names)
+
+
+def test_framework_recon_fingerprint_only_profiles_have_manual_pointers():
+    # Every fingerprint-only profile (empty probe list) must carry a manual
+    # CVE pointer — that's the whole point of registering it (signal-only
+    # "take a look"), and it keeps _PROFILES / _MANUAL_POINTERS in sync.
+    from shatterpoint.modules.framework_recon import _MANUAL_POINTERS, _PROFILES
+    for fid, probes in _PROFILES.items():
+        if not probes:
+            assert fid in _MANUAL_POINTERS, f"{fid} profile has no manual CVE pointer"
+
+
+def test_paths_200_only_detects_when_reachable():
+    # paths_200 (exploit-file presence): a 200 (reachable → vulnerable) detects;
+    # a 403 (blocked, e.g. Drupal .htaccess over /vendor) must NOT — that would
+    # be a false CVE-2017-9841 lead.
+    import asyncio
+
+    import httpx
+
+    from shatterpoint.utils.baseline import Baseline
+    fp = Fingerprinter({})
+    evalpath = "/vendor/phpunit/phpunit/src/Util/PHP/eval-stdin.php"
+
+    def make(code):
+        def handler(request):
+            return httpx.Response(code if request.url.path == evalpath else 404, text="x")
+        return handler
+
+    async def run(code):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(make(code))) as c:
+            b = Baseline(available=True, status_code=404, body_hash="zz", body_length=1)
+            return await fp.probe_known_paths(c, "http://t", baseline=b)
+
+    assert "phpunit" in {d["id"] for d in asyncio.run(run(200))}
+    assert "phpunit" not in {d["id"] for d in asyncio.run(run(403))}
+
+
+def test_batch3_product_signatures_detect():
+    fp = Fingerprinter({})
+    cases = [
+        ("Gitea", {}, "", {"i_like_gitea": "x"}),
+        ("MinIO", {"server": "MinIO"}, "", None),
+        ("Apache Flink", {}, "<title>Apache Flink Web Dashboard</title>", None),
+        ("GLPI", {}, "<title>Setup GLPI</title>", None),
+        ("Apache Superset", {}, '<script>{"SUPERSET_WEBSERVER_TIMEOUT":60}</script>', None),
+    ]
+    for name, headers, body, cookies in cases:
+        names = _names(fp.fingerprint_from_response("http://t", headers, body, cookies))
+        assert name in names, (name, names)
+
+
+def _html_pages(body, headers, n):
+    from types import SimpleNamespace
+    return {
+        f"http://t/p{i}": SimpleNamespace(
+            error=None,
+            headers={"content-type": "text/html", **headers},
+            content_type="text/html",
+            set_cookies=None,
+            body=body,
+        )
+        for i in range(n)
+    }
+
+
+def test_confidence_cap_body_only_capped_at_medium():
+    # A single body marker seen across many pages must NOT inflate to HIGH on
+    # page-count alone — body/script-only detections cap at medium.
+    fp = Fingerprinter({})
+    crawl = _html_pages('<nav class="navbar-toggler"></nav>', {}, 6)
+    bs = [t for t in fp.fingerprint_aggregate(crawl) if t["id"] == "bootstrap"]
+    assert bs and bs[0]["confidence"] == "medium", bs
+
+
+def test_confidence_cap_preserves_strong_channel_high():
+    # Same page count, but via a header (strong channel) → stays HIGH; proves
+    # the cap only touches body/script-only detections.
+    fp = Fingerprinter({})
+    crawl = _html_pages("<html></html>", {"server": "nginx/1.25"}, 6)
+    ng = [t for t in fp.fingerprint_aggregate(crawl) if t["id"] == "nginx"]
+    assert ng and ng[0]["confidence"] == "high", ng
 
 
 def test_fingerprint_body_word_boundary_rejects_substring():
@@ -1369,21 +1674,33 @@ def test_rails_still_fires_on_real_rails_evidence():
     assert "Ruby on Rails" in names
 
 
-def test_grafana_does_not_fire_on_login_alone():
-    """Regression: Grafana sig used to include `/login` in its paths list,
-    producing false-positives on every framework that exposes /login."""
-    # Path-probe behaviour: we can't easily simulate this without httpx,
-    # but the YAML edit removed /login from grafana.paths. Confirm via
-    # signature inspection.
-    fp = Fingerprinter({
-        "fingerprint": {
-            "check_headers": True, "check_cookies": True,
-            "check_meta": True, "check_scripts": True,
-        }
-    })
-    grafana_paths = fp.signatures.get("grafana", {}).get("paths", [])
-    assert "/login" not in grafana_paths
-    assert "/api/datasources" in grafana_paths  # new Grafana-specific probe
+def test_grafana_detected_by_strong_signals_no_path_probes():
+    """Grafana is detected by its definitive header / cookie / body only.
+    ALL path probes were removed: `/login` false-fired on every app with a
+    login, and `/api/health` + `/api/datasources` collided with any app
+    exposing an /api/* health endpoint (Metabase, ActiveMQ → a Grafana
+    false-positive)."""
+    fp = Fingerprinter({})
+    g = fp.signatures.get("grafana", {})
+    assert g.get("paths", []) == [], "grafana must have no path probes"
+    assert any(h.get("header") == "x-grafana-org-id" for h in g.get("headers", []))
+    assert "grafana_session" in g.get("cookies", [])
+    # still detects a real Grafana via its definitive header
+    assert "Grafana" in _names(fp.fingerprint_from_response("http://t", {"x-grafana-org-id": "1"}, ""))
+
+
+def test_batch6_precision_and_detection():
+    fp = Fingerprinter({})
+    # confluence: the bare word "Confluence" in body (a doc link) must NOT fire;
+    # the definitive X-Confluence-Request-Time header must.
+    assert "Atlassian Confluence" not in _names(
+        fp.fingerprint_from_response("http://t", {}, "<a href='x'>Confluence docs</a>"))
+    assert "Atlassian Confluence" in _names(
+        fp.fingerprint_from_response("http://t", {"x-confluence-request-time": "1"}, ""))
+    # new Java products
+    assert "Metabase" in _names(fp.fingerprint_from_response("http://t", {}, "", {"metabase.DEVICE": "x"}))
+    assert "Apache Solr" in _names(fp.fingerprint_from_response("http://t", {}, "<title>Solr Admin</title>"))
+    assert "Apache ActiveMQ" in _names(fp.fingerprint_from_response("http://t", {}, "<h1>Apache ActiveMQ</h1>"))
 
 
 def test_laravel_signature_form_fields_token_only():

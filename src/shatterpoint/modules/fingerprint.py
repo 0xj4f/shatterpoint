@@ -205,10 +205,21 @@ class Fingerprinter:
                 result.headers, getattr(result, "set_cookies", None),
             )
 
+            # Content-type gate: the body/script/meta channels only run on
+            # HTML. A bare substring like "react"/"gitlab" in a JSON API
+            # response or a crawled .js bundle is not page evidence, so we
+            # withhold the body for non-HTML responses (headers + cookies
+            # still apply — those are reliable regardless of content-type).
+            ct = (
+                getattr(result, "content_type", "")
+                or result.headers.get("content-type", "")
+            ).lower()
+            body_for_fp = result.body if "html" in ct else ""
+
             detections = self.fingerprint_from_response(
                 url,
                 result.headers,
-                result.body,
+                body_for_fp,
                 cookies,
                 forms=forms_by_url.get(url),
             )
@@ -239,6 +250,14 @@ class Fingerprinter:
                 confidence = "medium"
             else:
                 confidence = "low"
+
+            # Precision cap: a detection backed ONLY by weak content channels
+            # (body/script substrings) must not claim HIGH on page-count alone
+            # — a single content marker, however specific, is at most 'medium'.
+            # Detections with a corroborating channel (header/cookie/meta/
+            # form_field/stacktrace) or ≥2 distinct methods are unaffected.
+            if confidence == "high" and methods.issubset({"body", "script"}):
+                confidence = "medium"
 
             det["confidence"] = confidence
             # Deduplicate matched_on
@@ -311,6 +330,9 @@ class Fingerprinter:
                             "name": sig.get("name", tech_id),
                             "category": sig.get("category", "Unknown"),
                             "version": None,
+                            # A single path hit is weak evidence — explicit
+                            # low (was None → rendered as a confusing [null]).
+                            "confidence": "low",
                             "matched_on": [{
                                 "method": "path_probe",
                                 "detail": f"{path} returned 200",
@@ -325,6 +347,7 @@ class Fingerprinter:
                             "name": sig.get("name", tech_id),
                             "category": sig.get("category", "Unknown"),
                             "version": None,
+                            "confidence": "low",
                             "matched_on": [{
                                 "method": "path_probe",
                                 "detail": f"{path} returned {response.status_code} (exists but protected)",
@@ -334,8 +357,60 @@ class Fingerprinter:
                 except Exception:
                     pass
 
+            # paths_200: "exploit file reachable" checks that only count as a
+            # finding when the file is actually REACHABLE (200). A 403/404 means
+            # blocked or absent — NOT vulnerable — so it must not produce a lead
+            # (e.g. Drupal ships phpunit in /vendor but .htaccess 403s
+            # eval-stdin.php, which would be a false CVE-2017-9841 signal).
+            for path in sig.get("paths_200", []):
+                if path in probed_paths:
+                    continue
+                probed_paths.add(path)
+                url = f"{base_url.rstrip('/')}{path}"
+                try:
+                    response = await client.get(
+                        url, follow_redirects=True, timeout=httpx.Timeout(5),
+                    )
+                    if response.status_code == 200:
+                        body = response.text or ""
+                        if baseline.matches(response.status_code, body):
+                            baseline_drops += 1
+                            continue
+                        detections.append({
+                            "id": tech_id,
+                            "name": sig.get("name", tech_id),
+                            "category": sig.get("category", "Unknown"),
+                            "version": None,
+                            "confidence": "low",
+                            "matched_on": [{
+                                "method": "path_probe",
+                                "detail": f"{path} reachable (200) — exploit file exposed",
+                            }],
+                        })
+                        print_finding(
+                            "Fingerprint",
+                            f"Found {sig.get('name', tech_id)} via reachable {path}",
+                        )
+                except Exception:
+                    pass
+
         if baseline_drops:
             print_status(f"Dropped {baseline_drops} fingerprint probe(s) matching the 404 baseline")
+
+        # Catch-all guard (defense-in-depth, independent of the baseline): a
+        # real host does not legitimately match several unrelated tech-specific
+        # path sets. If ≥4 distinct technologies were "found" by path alone, the
+        # server is answering every path (catch-all / permissive 200s — e.g.
+        # when the baseline fetch failed on a slow host) → suppress these
+        # path-probe detections. The real product still surfaces via its
+        # body/header/meta/cookie signals in the later phases.
+        distinct = {d["id"] for d in detections}
+        if len(distinct) >= 4:
+            print_status(
+                f"Catch-all server suspected — {len(distinct)} technologies matched "
+                "by path alone; suppressing path-probe detections (precision guard)"
+            )
+            return []
 
         return detections
 

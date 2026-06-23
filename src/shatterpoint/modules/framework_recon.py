@@ -254,6 +254,36 @@ _PROFILES: dict[str, list[Probe]] = {
     "innoshop": _INNOSHOP_PROBES,
     "jenkins": _JENKINS_PROBES,
     "gitlab": _GITLAB_PROBES,
+    # Fingerprint-only products — detected by signature; their famous CVE is
+    # surfaced as a manual "take a look" pointer below (no safe unauthenticated
+    # GET probe exists — every exploit needs a crafted POST/PUT/payload).
+    "opennetadmin": [],
+    "cacti": [],
+    "webmin": [],
+    "craftcms": [],
+    "bludit": [],
+    "thinkphp": [],
+    "couchdb": [],
+    "confluence": [],
+    "nagiosxi": [],
+    "strapi": [],
+    "glpi": [],
+    "phpunit": [],
+    "superset": [],
+    "gitea": [],
+    "minio": [],
+    "flink": [],
+    "nodered": [],
+    "nexus": [],
+    "pimcore": [],
+    "octobercms": [],
+    "druid": [],
+    "grav": [],
+    "kibana": [],
+    "solr": [],
+    "metabase": [],
+    "activemq": [],
+    "gerapy": [],
 }
 
 
@@ -309,6 +339,134 @@ _MANUAL_POINTERS: dict[str, tuple[str, ...]] = {
         "CVE-2021-22205 (CVSS 10.0) — GitLab CE/EE 11.9 to < 13.8.8 / 13.9.6 / 13.10.3 "
         "unauthenticated RCE: a crafted uploaded image reaches a vulnerable ExifTool "
         "(CVE-2021-22204). POST upload vector — not an HTTP GET; test manually.",
+    ),
+    "opennetadmin": (
+        "CVE-2019-25065 / ONA RCE — unauthenticated OS-command injection via POST /ona/ "
+        "(xajax window_submit → the ip param reaches shell_exec unsanitised). Test manually.",
+    ),
+    "cacti": (
+        "CVE-2022-46169 (CVSS 9.8) — unauthenticated RCE: remote_agent.php trusts "
+        "X-Forwarded-For for its poller-IP check, then action=polldata feeds poller_id "
+        "into a shell. Spoof 'X-Forwarded-For: 127.0.0.1'; test manually.",
+    ),
+    "webmin": (
+        "CVE-2019-15107 — unauthenticated RCE backdoor in password_change.cgi (the 'old' "
+        "param is piped to a shell); present in the compromised 1.890–1.920 builds. "
+        "Test manually.",
+    ),
+    "craftcms": (
+        "CVE-2024-56145 — unauthenticated SSTI→RCE when PHP register_argc_argv=On: "
+        "GET /index.php?--templatesPath=ftp://… repoints the Twig template root. Test manually.",
+    ),
+    "bludit": (
+        "CVE-2019-16113 (CVSS 9.8) — authenticated upload→RCE; chain it with the "
+        "X-Forwarded-For login-lockout bypass to brute-force /admin/, then abuse "
+        "/admin/ajax/upload-images. Test manually.",
+    ),
+    "thinkphp": (
+        "CVE-2018-20062 — unauthenticated RCE: POST /index.php?s=captcha with "
+        "_method=__construct&filter[]=system&… re-runs the Request constructor and "
+        "installs a system() filter. Test manually.",
+    ),
+    "couchdb": (
+        "CVE-2017-12635 + CVE-2017-12636 (CVSS 9.8) — unauthenticated PUT /_users/… with "
+        "duplicate 'roles' keys registers a server admin (JSON-parser mismatch), then "
+        "_config/query_servers runs OS commands. Test manually.",
+    ),
+    "confluence": (
+        "CVE-2022-26134 (CVSS 9.8) — unauthenticated OGNL→RCE: the WebWork mapper resolves "
+        "the URI path through OGNL, so a GET whose path is a URL-encoded ${...} expression "
+        "executes. Test manually.",
+    ),
+    "nagiosxi": (
+        "CVE-2019-15949 — authenticated RCE: as nagiosadmin upload a check plugin via "
+        "/nagiosxi/admin/monitoringplugins.php, then trigger it from a system profile. "
+        "Test manually.",
+    ),
+    "strapi": (
+        "CVE-2019-18818 + CVE-2019-19609 (CVSS 9.8) — unauthenticated admin password reset "
+        "(POST /admin/auth/reset-password) yields an admin JWT, then the plugin installer "
+        "gives RCE. Test manually.",
+    ),
+    "glpi": (
+        "CVE-2022-35914 — unauthenticated RCE: GLPI bundles htmLawed and ships "
+        "/vendor/htmlawed/htmlawed/htmLawedTest.php, which eval()s the 'hhook'/'text' "
+        "params. Test manually.",
+    ),
+    "phpunit": (
+        "CVE-2017-9841 — unauthenticated RCE: /vendor/phpunit/phpunit/src/Util/PHP/"
+        "eval-stdin.php runs eval(file_get_contents('php://input')); POST PHP to it. "
+        "shatterpoint only confirms the file is web-reachable (GET, no payload). Test manually.",
+    ),
+    "superset": (
+        "CVE-2023-27524 — auth-bypass→RCE: a default/weak Flask SECRET_KEY lets you forge an "
+        "admin session cookie, then run code via SQL Lab. Check for the shipped default key. "
+        "Test manually.",
+    ),
+    "gitea": (
+        "CVE-2020-14144 — authenticated RCE via Git hooks: with repo-admin access set a "
+        "post-receive hook that runs commands (try default/weak creds first). Test manually.",
+    ),
+    "minio": (
+        "CVE-2023-28432 — unauthenticated info disclosure: POST /minio/bootstrap/v1/verify "
+        "leaks MINIO_ROOT_USER / MINIO_ROOT_PASSWORD from the env in a cluster deploy. "
+        "Test manually.",
+    ),
+    "flink": (
+        "CVE-2020-17519 — unauthenticated arbitrary file read: "
+        "GET /jobmanager/logs/..%252f..%252f<path> traverses out of the log dir. Test manually.",
+    ),
+    "nodered": (
+        "CVE-2021-3223 — unauthenticated path traversal in node-red-dashboard: "
+        "GET /ui_base/js/..%2f..%2f<abs-path> reads arbitrary files. Test manually.",
+    ),
+    "nexus": (
+        "CVE-2024-4956 (CVSS 7.5) — unauthenticated path traversal: a decoded "
+        "GET /%2F..%2F..%2F<abs-path> reads arbitrary files on Nexus Repository < 3.68.1. "
+        "Test manually.",
+    ),
+    "pimcore": (
+        "CVE-2021-23340 — authenticated path traversal (try default admin creds): "
+        "/admin/reports/custom-report/download-csv?exportFile=<../../abs-path>. Test manually.",
+    ),
+    "octobercms": (
+        "CVE-2020-5295 — authenticated path traversal (try default backend creds): the "
+        "onOpenTemplate backend handler takes a path=<../..> outside the theme dir. Test manually.",
+    ),
+    "druid": (
+        "CVE-2021-36749 (CVSS 5.3) — unauthenticated LFI: POST /druid/indexer/v1/sampler "
+        "with an HTTP firehose uris=[\"file://<abs-path>\"] makes Druid read local files. "
+        "Test manually.",
+    ),
+    "grav": (
+        "CVE-2020-29556 — authenticated (try default admin creds) path traversal: set the "
+        "backup profile root to GRAV_ROOT/.. then download backup.json to exfiltrate files. "
+        "Test manually.",
+    ),
+    "kibana": (
+        "CVE-2018-17246 — Kibana < 5.6.13 / 6.4.3 unauthenticated local file inclusion in the "
+        "Console plugin (/api/console/api_server?sense_version=&apis=../../…) loads a local "
+        ".js as a Node module → RCE. Test manually.",
+    ),
+    "solr": (
+        "CVE-2019-17558 — unauthenticated Velocity-template SSTI→RCE: enable params resource "
+        "loader on a core config, then a crafted v.template Velocity payload runs code. "
+        "Also check CVE-2017-12629 (RCE/XXE). Test manually.",
+    ),
+    "metabase": (
+        "CVE-2023-38646 (CVSS 9.8) — pre-auth RCE: leak the setup-token via "
+        "GET /api/session/properties, then POST /api/setup/validate with an H2 JDBC "
+        "'INIT=...' payload to run commands. Test manually.",
+    ),
+    "activemq": (
+        "CVE-2023-46604 (CVSS 10.0) — OpenWire deserialization RCE on the BROKER port "
+        "(61616, not this 8161 web console): a marshalled ExceptionResponse instantiates a "
+        "class from a remote Spring XML. Test the OpenWire port manually.",
+    ),
+    "gerapy": (
+        "CVE-2021-43857 — Gerapy < 0.9.8 authenticated RCE (the lab ships a default/weak "
+        "login): the project-parse/template path reaches os.popen. Try default creds, then "
+        "test manually.",
     ),
 }
 

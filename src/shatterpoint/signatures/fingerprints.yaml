@@ -79,13 +79,14 @@ joomla:
 apache:
   name: "Apache HTTP Server"
   category: "Web Server"
+  # Server header only. Dropped the /server-status, /server-info and
+  # /.htaccess path probes: nginx 403s dotfiles too (so /.htaccess scored
+  # an Apache false-positive on nginx hosts like phpMyAdmin), and PHP dev
+  # servers serve .htaccess as a static 200 (Laravel lab). The Server
+  # banner is the only reliable Apache tell.
   headers:
     - header: "server"
       pattern: "(?i)apache/?([\\d.]+)?"
-  paths:
-    - "/server-status"
-    - "/server-info"
-    - "/.htaccess"
 
 nginx:
   name: "Nginx"
@@ -124,11 +125,13 @@ tomcat:
   headers:
     - header: "server"
       pattern: "(?i)apache[- ]coyote/?([\\d.]+)?"
+  # Tomcat-Manager paths are Tomcat-unique. Dropped /docs/ + /examples/:
+  # they're generic (Cacti and many apps ship a /docs/ dir → a Tomcat
+  # false-positive). The Apache-Coyote Server header + "Apache Tomcat" body
+  # are the definitive tells; the manager paths corroborate.
   paths:
     - "/manager/html"
     - "/host-manager/html"
-    - "/docs/"
-    - "/examples/"
     - "/WEB-INF/"
   body:
     - "Apache Tomcat"
@@ -137,16 +140,18 @@ springboot:
   name: "Spring Boot"
   category: "Framework"
   # X-Application-Context is a Spring-Boot-specific header (older 1.x/2.x).
-  # The Whitelabel Error Page + org.springframework body markers are
-  # distinctive. /actuator/health returning {"status":"UP"} is the classic
-  # Spring Boot tell. Each signal is Spring-specific (no bare PHP/server
-  # banners that would false-positive on unrelated apps).
+  # The Whitelabel Error Page is distinctive. The body trace marker must be
+  # org.springframework.BOOT — bare "org.springframework" false-positives
+  # on anything bundling spring-security (e.g. Jenkins → org.springframework.
+  # security.*), mirroring the same tightening already applied to the
+  # stack-trace miner. /actuator/health returning {"status":"UP"} is the
+  # classic Spring Boot tell.
   headers:
     - header: "x-application-context"
       pattern: "."
   body:
     - "Whitelabel Error Page"
-    - "org.springframework"
+    - "org.springframework.boot"
   paths:
     - "/actuator/health"
 
@@ -309,11 +314,12 @@ cloudflare:
 jquery:
   name: "jQuery"
   category: "JavaScript Library"
-  body:
-    - "jquery"
-    - "jQuery"
+  # Detect only via a real versioned <script src> include (covers
+  # jquery-3.6.0.min.js, jquery.min.js?ver=, jquery.slim.min.js). The
+  # bare "jquery"/"jQuery" body substrings fired on any minified bundle
+  # or page that merely referenced jquery.* in code.
   scripts:
-    - pattern: "jquery[.-]([\\d.]+)(?:\\.min)?\\.js"
+    - pattern: "jquery(?:[-.]([\\d.]+))?(?:\\.slim)?(?:\\.min)?\\.js"
 
 bootstrap:
   name: "Bootstrap"
@@ -332,26 +338,39 @@ bootstrap:
 react:
   name: "React"
   category: "JavaScript Framework"
+  # Bare "react" body substring false-fires on any minified bundle / code
+  # that references react.* — require a real React DOM-root marker or a
+  # versioned CDN <script src>. Bundle-only React surfaces via --spa.
   body:
-    - "react"
-    - "_reactRootContainer"
     - "data-reactroot"
+    - "_reactRootContainer"
+  scripts:
+    - pattern: "react(?:-dom)?[-.@]([\\d.]+)(?:\\.min)?\\.js"
 
 angular:
   name: "Angular"
   category: "JavaScript Framework"
+  # Dropped bare "angular" (fires on any bundle mentioning angular).
+  # ng-version / ng-app are HTML attributes; _nghost / _ngcontent are
+  # Angular's view-encapsulation attributes in rendered markup.
   body:
     - "ng-version"
     - "ng-app"
-    - "angular"
+    - "_nghost"
+    - "_ngcontent"
 
 vue:
   name: "Vue.js"
   category: "JavaScript Framework"
+  # Dropped bare "Vue.js" (matches any comment/string naming the library).
+  # __vue__ / v-cloak / data-v-app are real Vue runtime/markup markers;
+  # plus a versioned CDN <script src>.
   body:
-    - "Vue.js"
     - "__vue__"
     - "v-cloak"
+    - "data-v-app"
+  scripts:
+    - pattern: "vue(?:@|[-.])([\\d.]+)(?:\\.min)?\\.js"
 
 nextjs:
   name: "Next.js"
@@ -388,21 +407,22 @@ phpmyadmin:
 webmin:
   name: "Webmin"
   category: "Admin Panel"
-  paths:
-    - ":10000"
+  # MiniServ is Webmin's bespoke HTTP server — a definitive, FP-safe tell.
+  # (Dropped the bogus ":10000" path: probe_known_paths concatenates it onto
+  # base_url into a malformed URL, and the port already comes from -u.)
+  headers:
+    - header: "server"
+      pattern: "(?i)miniserv/?([\\d.]+)?"
   body:
     - "Webmin"
 
 grafana:
   name: "Grafana"
   category: "Monitoring"
-  # Grafana-specific paths only. `/login` was producing false positives
-  # on every framework that ships an auth scaffold (Laravel, Rails,
-  # Django, Spring Security, …).
-  paths:
-    - "/api/health"
-    - "/api/datasources"
-    - "/public/build/runtime"
+  # Header + cookie + body only. Dropped the path probes — /api/health and
+  # /api/datasources collide with any app exposing an /api/* health endpoint
+  # (Metabase, ActiveMQ → a Grafana false-positive). Grafana's own signals
+  # below are decisive.
   headers:
     - header: "x-grafana-org-id"
       pattern: "."
@@ -415,25 +435,234 @@ grafana:
 jenkins:
   name: "Jenkins"
   category: "CI/CD"
-  # The X-Jenkins header is the definitive signal (present on every
-  # Jenkins response). REMOVED the generic /login path (any app with a
-  # 200 /login was being tagged Jenkins). /script + /manage redirect to
-  # /login when unauthenticated, so they add little beyond the header;
-  # kept the body marker as a secondary confirm.
+  # The X-Jenkins header is the definitive signal. Dropped the bare
+  # "Jenkins" body word — it fired on any page merely naming Jenkins
+  # (e.g. GitLab's CI-integration label, scoring a HIGH false positive).
+  # "Jenkins-Crumb" is Jenkins-specific CSRF-crumb markup only real
+  # Jenkins emits, so it's a safe secondary confirm.
   headers:
     - header: "x-jenkins"
       pattern: "([\\d.]+)"
   body:
-    - "Jenkins"
+    - "Jenkins-Crumb"
 
 gitlab:
   name: "GitLab"
   category: "Version Control"
-  paths:
-    - "/users/sign_in"
-    - "/api/v4/"
+  # X-Gitlab-Feature-Category is a definitive GitLab response header; the
+  # _gitlab_session cookie + meta description corroborate. Dropped the bare
+  # "gitlab" body word AND the /users/sign_in + /api/v4/ path probes — the
+  # latter aren't GitLab-unique (Grafana 401s /api/v4/, scoring a GitLab
+  # false-positive). Header + cookie are decisive on a real GitLab.
+  headers:
+    - header: "x-gitlab-feature-category"
+      pattern: "."
+  cookies:
+    - "_gitlab_session"
   meta:
     - name: "description"
       pattern: "(?i)gitlab"
+
+# ── Standalone products / apps (header- or marker-based; FP-safe) ──────
+# Each names the product so the operator gets a real identification, and
+# framework-recon surfaces its famous CVE as a "verify manually" pointer.
+
+opennetadmin:
+  name: "OpenNetAdmin"
+  category: "IPAM"
+  cookies:
+    - "ona_context_name"
   body:
-    - "gitlab"
+    - "OpenNetAdmin"
+
+cacti:
+  name: "Cacti"
+  category: "Monitoring"
+  cookies:
+    - "Cacti"
+  body:
+    - "Login to Cacti"
+
+craftcms:
+  name: "Craft CMS"
+  category: "CMS"
+  headers:
+    - header: "x-powered-by"
+      pattern: "(?i)craft cms"
+  body:
+    - "Craft CMS"
+
+bludit:
+  name: "Bludit"
+  category: "CMS"
+  headers:
+    - header: "x-powered-by"
+      pattern: "(?i)bludit"
+  body:
+    - "BLUDIT"
+
+thinkphp:
+  name: "ThinkPHP"
+  category: "Framework"
+  body:
+    - "ThinkPHP"
+
+couchdb:
+  name: "Apache CouchDB"
+  category: "Database"
+  headers:
+    - header: "server"
+      pattern: "(?i)couchdb/?([\\d.]+)?"
+
+confluence:
+  name: "Atlassian Confluence"
+  category: "Wiki"
+  # X-Confluence-Request-Time is definitive and on every Confluence response.
+  # Dropped the body "Confluence" marker — the bare word appears in unrelated
+  # apps' doc links (e.g. the Struts2 showcase) → false positive.
+  headers:
+    - header: "x-confluence-request-time"
+      pattern: "."
+
+nagiosxi:
+  name: "Nagios XI"
+  category: "Monitoring"
+  body:
+    - "Nagios XI"
+
+strapi:
+  name: "Strapi"
+  category: "Headless CMS"
+  headers:
+    - header: "x-powered-by"
+      pattern: "(?i)strapi"
+
+glpi:
+  name: "GLPI"
+  category: "IT Asset Management"
+  body:
+    - "GLPI"
+
+phpunit:
+  name: "PHPUnit"
+  category: "Dev Dependency"
+  # CVE-2017-9841: only a REACHABLE (200) eval-stdin.php is exploitable, so use
+  # paths_200 — a blocked 403 (Drupal ships phpunit in /vendor but .htaccess
+  # denies it) must NOT produce a lead. No body marker: "PHPUnit" is name-
+  # dropped in composer/status pages of unrelated PHP apps (Drupal included).
+  paths_200:
+    - "/vendor/phpunit/phpunit/src/Util/PHP/eval-stdin.php"
+
+superset:
+  name: "Apache Superset"
+  category: "Analytics"
+  # SUPERSET_WEBSERVER_TIMEOUT is a Superset bootstrap config constant —
+  # unique + a complete token (the bare word "superset" would false-fire on
+  # prose, and "SUPERSET_WEBSERVER" fails the word boundary before its "_").
+  body:
+    - "SUPERSET_WEBSERVER_TIMEOUT"
+
+gitea:
+  name: "Gitea"
+  category: "Version Control"
+  cookies:
+    - "i_like_gitea"
+  body:
+    - "Gitea"
+
+minio:
+  name: "MinIO"
+  category: "Object Storage"
+  headers:
+    - header: "server"
+      pattern: "(?i)minio"
+
+flink:
+  name: "Apache Flink"
+  category: "Stream Processing"
+  body:
+    - "Apache Flink"
+
+nodered:
+  name: "Node-RED"
+  category: "Flow Automation"
+  body:
+    - "Node-RED"
+
+nexus:
+  name: "Sonatype Nexus Repository"
+  category: "Artifact Repository"
+  headers:
+    - header: "server"
+      pattern: "(?i)nexus/?([\\d.]+)?"
+
+pimcore:
+  name: "Pimcore"
+  category: "CMS"
+  headers:
+    - header: "x-powered-by"
+      pattern: "(?i)pimcore"
+
+octobercms:
+  name: "October CMS"
+  category: "CMS"
+  cookies:
+    - "october_session"
+
+druid:
+  name: "Apache Druid"
+  category: "Analytics"
+  body:
+    - "Apache Druid"
+
+grav:
+  name: "Grav CMS"
+  category: "CMS"
+  body:
+    - "getgrav"
+    - "Grav"
+
+kibana:
+  name: "Kibana"
+  category: "Analytics"
+  headers:
+    - header: "kbn-version"
+      pattern: "([\\d.]+)"
+    - header: "kbn-name"
+      pattern: "."
+
+limesurvey:
+  name: "LimeSurvey"
+  category: "Survey"
+  body:
+    - "LimeSurvey"
+
+mybb:
+  name: "MyBB"
+  category: "Forum"
+  body:
+    - "MyBB"
+
+solr:
+  name: "Apache Solr"
+  category: "Search"
+  body:
+    - "Solr Admin"
+
+metabase:
+  name: "Metabase"
+  category: "Analytics"
+  cookies:
+    - "metabase.DEVICE"
+
+activemq:
+  name: "Apache ActiveMQ"
+  category: "Message Broker"
+  body:
+    - "Apache ActiveMQ"
+
+gerapy:
+  name: "Gerapy"
+  category: "Scrapy GUI"
+  body:
+    - "Gerapy"
