@@ -8,6 +8,37 @@ import re
 
 from bs4 import BeautifulSoup, Comment
 
+# XML documents whose ROOT element identifies them, even without an
+# ``<?xml?>`` declaration (some servers omit it).
+_XML_ROOTS = {"rss", "feed", "urlset", "sitemapindex", "oembed", "sitemap"}
+
+
+def _make_soup(markup: str) -> BeautifulSoup:
+    """Parse ``markup`` with the right BeautifulSoup backend.
+
+    XML documents — WordPress sitemaps, RSS/Atom feeds, and oembed
+    ``?format=xml`` responses — must use the XML parser. Feeding them to the
+    HTML parser (``"lxml"``) emits ``XMLParsedAsHTMLWarning`` and parses them
+    unreliably.
+
+    Routing is decided by the **root element**, not by whether ``<html>``
+    appears anywhere: a WordPress oembed doc is ``<?xml?><oembed>`` but
+    *contains* an ``<html>`` child (the escaped embed markup), so a naive
+    "<html> present → HTML" check misroutes it. We read the first real tag
+    (skipping the ``<?xml?>`` prolog, PIs, comments and ``<!DOCTYPE>``):
+    an ``<html>`` root means (X)HTML and keeps the HTML parser (so forms and
+    links are still extracted); an XML declaration or a known XML root means
+    the XML parser.
+    """
+    # Find the first real element tag — re.search skips any leading BOM,
+    # whitespace, <?xml?>/PI and <!DOCTYPE>/comment, so the root is detected
+    # regardless of a byte-order mark.
+    head = (markup or "")[:512].lstrip().lower()
+    m = re.search(r"<([a-z][\w:-]*)", head)
+    root = m.group(1) if m else ""
+    looks_xml = (head.startswith("<?xml") or root in _XML_ROOTS) and root != "html"
+    return BeautifulSoup(markup, "xml" if looks_xml else "lxml")
+
 
 class HTMLParser:
     """Parses HTML content and extracts recon-relevant data."""
@@ -26,7 +57,7 @@ class HTMLParser:
         """Extract all href and src links from HTML."""
         links = set()
         try:
-            soup = BeautifulSoup(html, "lxml")
+            soup = _make_soup(html)
 
             # <a href="...">
             for tag in soup.find_all("a", href=True):
@@ -72,7 +103,7 @@ class HTMLParser:
         """
         forms = []
         try:
-            soup = BeautifulSoup(html, "lxml")
+            soup = _make_soup(html)
 
             for form in soup.find_all("form"):
                 form_data = {
@@ -138,7 +169,7 @@ class HTMLParser:
         """
         comments = []
         try:
-            soup = BeautifulSoup(html, "lxml")
+            soup = _make_soup(html)
 
             for comment in soup.find_all(string=lambda text: isinstance(text, Comment)):
                 text = comment.strip()
@@ -178,7 +209,7 @@ class HTMLParser:
         """Extract meta tags - useful for fingerprinting and info gathering."""
         meta_tags = []
         try:
-            soup = BeautifulSoup(html, "lxml")
+            soup = _make_soup(html)
             for meta in soup.find_all("meta"):
                 tag_data = {}
                 for attr in ["name", "property", "http-equiv", "content", "charset"]:
@@ -199,7 +230,7 @@ class HTMLParser:
         """
         scripts = {"external": [], "inline": []}
         try:
-            soup = BeautifulSoup(html, "lxml")
+            soup = _make_soup(html)
             for script in soup.find_all("script"):
                 if script.get("src"):
                     scripts["external"].append({
@@ -220,7 +251,7 @@ class HTMLParser:
         """Extract page title and heading hierarchy (useful for mapping)."""
         headings = []
         try:
-            soup = BeautifulSoup(html, "lxml")
+            soup = _make_soup(html)
 
             title = soup.find("title")
             if title and title.string:
