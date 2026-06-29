@@ -49,6 +49,7 @@ from shatterpoint.utils.formatter import (
     print_summary,
     save_report,
 )
+from shatterpoint.utils.proxy import resolve_proxy
 from shatterpoint.utils.stacktrace import merge_findings, mine_response
 from shatterpoint.utils.validator import URLValidator
 
@@ -123,6 +124,11 @@ Examples:
   # SPA-only pass, skip noisy path probing on catch-all routers
   shatterpoint -u http://localhost:3001 --token $JWT --spa --no-recon
 
+  # Route ALL traffic through a proxy — inspect (Burp), rewrite (mitmproxy),
+  # or scan from another IP (TOR). Bare host:port defaults to http://.
+  shatterpoint -u http://target.htb --proxy http://127.0.0.1:8080
+  shatterpoint -u http://target.htb --proxy socks5h://127.0.0.1:9050   # TOR
+
   # Save to a specific loot directory, verbose
   shatterpoint -u https://10.10.10.1:8443 -o ./loot -v
 
@@ -187,6 +193,17 @@ Environment:
             "An explicit -H 'Authorization: ...' overrides --token."
         ),
     )
+    parser.add_argument(
+        "--proxy",
+        metavar="URL",
+        help=(
+            "Route ALL traffic through a proxy. Accepts http://host:port "
+            "(Burp / mitmproxy; a bare host:port defaults to http://) or "
+            "socks5h://host:port (TOR: socks5h://127.0.0.1:9050 — DNS via the "
+            "proxy). Overrides config 'proxy.url'. A malformed value aborts "
+            "the scan rather than connecting directly."
+        ),
+    )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     return parser.parse_args()
 
@@ -203,6 +220,9 @@ class CrawlOrchestrator:
 
     def __init__(self, config: dict):
         self.config = config
+        # Optional upstream proxy — applied to every httpx client this
+        # orchestrator (and the spider) opens, so ALL traffic is routed.
+        self.proxy_url = (config.get("proxy") or {}).get("url")
         self.target_url = config["target"]["url"]
         self.start_time = time.time()
 
@@ -274,6 +294,7 @@ class CrawlOrchestrator:
             headers=recon_headers,
             limits=httpx.Limits(max_connections=10),
             event_hooks=recon_hooks,
+            proxy=self.proxy_url,
         ) as recon_client:
             await self._phase1_recon(recon_client)
             await self._phase15_path_probe(recon_client)
@@ -688,6 +709,15 @@ def main():
     header_display = redact_headers(custom_headers)
     config["auth"]["headers_display"] = header_display
 
+    # Resolve the proxy (CLI > config). A malformed value aborts the scan —
+    # we must never silently connect direct when a proxy was requested, as
+    # that would deanonymise a TOR user.
+    proxy_url, proxy_err = resolve_proxy(args.proxy, config)
+    if proxy_err:
+        console.print(f"[bold red]ERROR:[/bold red] --proxy {proxy_err}")
+        sys.exit(2)
+    config.setdefault("proxy", {})["url"] = proxy_url
+
     print_banner(token_display=token_display, header_display=header_display)
 
     for bad in header_errors:
@@ -711,6 +741,8 @@ def main():
 
     print_status(f"Target: {target_url}")
     print_status(f"Config: {args.config or 'config.yaml (default, optional)'}")
+    if proxy_url:
+        print_status(f"Proxy: {proxy_url} — all traffic routed through it")
     if token:
         warning = warn_on_expiry(token)
         if warning:

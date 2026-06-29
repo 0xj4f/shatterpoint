@@ -9,6 +9,14 @@ Version numbers are produced at release time from the GitHub Actions
 `MAJOR_VERSION` and `MINOR_VERSION` variables; the patch component
 auto-increments. See [README — Release process](README.md) for details.
 
+## [1.3.0] - 2026-06-29
+
+### Added
+- **`--proxy <url>` — route ALL outbound traffic through a single proxy.** Every request shatterpoint makes — recon, fingerprinting, framework-recon, SPA bundle mining, the crawl, and the internal baseline probe — is routed through the given proxy. Three intended use cases: **TOR** (`--proxy socks5h://127.0.0.1:9050` — scan from a different exit IP, with `socks5h` resolving DNS *through* the proxy so the target hostname never leaks), **Burp** (`--proxy http://127.0.0.1:8080` — inspect every request), and **mitmproxy** (record/rewrite). A bare `host:port` defaults to `http://`. Also settable via `config.yaml` `proxy.url` (the CLI flag overrides it). SOCKS/TOR support ships in the box via the new `httpx[socks]` dependency. **Fail-closed:** a malformed proxy value aborts the scan, and a requested proxy is never silently bypassed — so a typo can't deanonymise a TOR user.
+
+### Internal
+- New `shatterpoint.utils.proxy` helper (`normalize_proxy` / `resolve_proxy`, CLI > config precedence) with 13 tests. The proxy is injected into the only two `httpx.AsyncClient` instances in the codebase (the recon client and the crawl client), which is what guarantees full-traffic coverage.
+
 ## [1.2.0] - 2026-06-23
 
 ### Added
@@ -158,6 +166,7 @@ First public release. The `1.0` line covers the full initial feature set: web re
 - Test suite: 76 fixture-based unit tests covering auth, baseline, dedup, fingerprint word-boundary, SPA framework detection, route extraction (React Router v6, Vue Router, Angular), source-map parsing, webpack chunk extraction, secret patterns, and HTTP security-header detection.
 - Project renamed from `0xj4f-webcrawler` to `shatterpoint`.
 
-[Unreleased]: https://github.com/0xj4f/shatterpoint/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/0xj4f/shatterpoint/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/0xj4f/shatterpoint/releases/tag/v1.2.0
 [1.1.0]: https://github.com/0xj4f/shatterpoint/releases/tag/v1.1.0
 [1.0.0]: https://github.com/0xj4f/shatterpoint/releases/tag/v1.0.0

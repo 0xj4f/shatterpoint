@@ -66,6 +66,9 @@ class Spider:
         self.target_scheme = validator.scheme
         self.target_netloc = validator.target_domain
 
+        # Optional upstream proxy — routes every crawl request (TOR/Burp/mitmproxy).
+        self.proxy_url = (config.get("proxy") or {}).get("url")
+
         # State
         self.visited: set[str] = set()
         self.queued: set[str] = set()
@@ -112,6 +115,7 @@ class Spider:
                 max_connections=self.concurrency + 5,
                 max_keepalive_connections=self.concurrency,
             ),
+            proxy=self.proxy_url,
         ) as client:
             workers = []
             for _ in range(self.concurrency):

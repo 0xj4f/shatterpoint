@@ -81,6 +81,14 @@ auth:
     # X-API-Key: "your-api-key"
     # Cookie: "session=abc123"
 
+# Proxy (optional)
+# Route ALL outbound traffic through one proxy. CLI --proxy overrides this.
+# A bare host:port defaults to http://.
+#   Burp / mitmproxy:  http://127.0.0.1:8080
+#   TOR:               socks5h://127.0.0.1:9050   # socks5h = DNS through the proxy (no leak)
+proxy:
+  url: null                           # null = direct connection
+
 # Output
 output:
   directory: "./output"
