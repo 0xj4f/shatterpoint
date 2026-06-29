@@ -16,6 +16,7 @@ from pathlib import Path
 
 import httpx
 import yaml
+from bs4 import XMLParsedAsHTMLWarning
 
 from shatterpoint import __version__
 from shatterpoint.modules.extractor import Extractor
@@ -55,6 +56,9 @@ from shatterpoint.utils.validator import URLValidator
 
 # Suppress SSL warnings (OSCP targets use self-signed certs)
 warnings.filterwarnings("ignore", message="Unverified HTTPS request")
+# XML docs (sitemaps, RSS feeds, oembed ?format=xml) are routed to the XML
+# parser in parser.py; this filters any residual warning from a mislabeled body.
+warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 
 
 class _BannerArgumentParser(argparse.ArgumentParser):

@@ -9,6 +9,11 @@ Version numbers are produced at release time from the GitHub Actions
 `MAJOR_VERSION` and `MINOR_VERSION` variables; the patch component
 auto-increments. See [README — Release process](README.md) for details.
 
+## [1.3.1] - 2026-06-29
+
+### Fixed
+- **`XMLParsedAsHTMLWarning` noise when crawling XML documents.** WordPress sitemaps, RSS `/feed/`, and oembed `?format=xml` responses were run through BeautifulSoup's HTML parser, leaking multi-line warning blocks into scan output (seen on a `weareadaptive.com` scan). The parser is now XML-aware (`parser.py:_make_soup`): it routes by the document's **root element** — `<urlset>`/`<sitemapindex>`/`<rss>`/`<feed>`/`<oembed>` (or an `<?xml?>` declaration) → the XML parser; an `<html>` root → the HTML parser. This correctly handles a WordPress oembed doc, whose root is `<oembed>` but which *contains* an `<html>` child (a naive "contains `<html>`" check misroutes it). A `filterwarnings` backstop in `crawler.py` silences any residual edge case. HTML/XHTML extraction and crawl coverage are unchanged.
+
 ## [1.3.0] - 2026-06-29
 
 ### Added
@@ -166,7 +171,9 @@ First public release. The `1.0` line covers the full initial feature set: web re
 - Test suite: 76 fixture-based unit tests covering auth, baseline, dedup, fingerprint word-boundary, SPA framework detection, route extraction (React Router v6, Vue Router, Angular), source-map parsing, webpack chunk extraction, secret patterns, and HTTP security-header detection.
 - Project renamed from `0xj4f-webcrawler` to `shatterpoint`.
 
-[Unreleased]: https://github.com/0xj4f/shatterpoint/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/0xj4f/shatterpoint/compare/v1.3.1...HEAD
+[1.3.1]: https://github.com/0xj4f/shatterpoint/releases/tag/v1.3.1
+[1.3.0]: https://github.com/0xj4f/shatterpoint/releases/tag/v1.3.0
 [1.2.0]: https://github.com/0xj4f/shatterpoint/releases/tag/v1.2.0
 [1.1.0]: https://github.com/0xj4f/shatterpoint/releases/tag/v1.1.0
 [1.0.0]: https://github.com/0xj4f/shatterpoint/releases/tag/v1.0.0

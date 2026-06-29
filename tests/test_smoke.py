@@ -3,6 +3,9 @@
 import base64
 import json
 import time
+import warnings
+
+from bs4 import XMLParsedAsHTMLWarning
 
 from shatterpoint.crawler import CrawlOrchestrator
 from shatterpoint.modules.extractor import Extractor
@@ -2237,6 +2240,96 @@ def test_spider_reads_proxy_from_config():
     cfg = {"target": {"url": "http://t.test"}, "proxy": {"url": "http://127.0.0.1:8080"}}
     sp = Spider(cfg, URLValidator("http://t.test"))
     assert sp.proxy_url == "http://127.0.0.1:8080"
+
+
+# ─── XML-aware parsing tests (no XMLParsedAsHTMLWarning) ──────────────
+
+_SITEMAP_XML = (
+    '<?xml version="1.0" encoding="UTF-8"?>'
+    '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+    '<url><loc>https://example.com/a/</loc></url>'
+    '<url><loc>https://example.com/b/</loc></url>'
+    '</urlset>'
+)
+_RSS_XML = (
+    '<?xml version="1.0" encoding="UTF-8"?>'
+    '<rss version="2.0"><channel><title>Feed</title>'
+    '<item><link>https://example.com/post/1</link></item></channel></rss>'
+)
+_OEMBED_XML = (
+    # WordPress oembed: XML root <oembed> but contains an <html> CHILD (the
+    # escaped embed markup). Routing must key on the root, not "<html> present".
+    '<?xml version="1.0"?>'
+    '<oembed><type>rich</type><version>1.0</version>'
+    '<html>&lt;iframe src="https://example.com/embed"&gt;&lt;/iframe&gt;</html>'
+    '</oembed>'
+)
+_HTML_DOC = (
+    '<!DOCTYPE html><html><head><title>Hi</title></head><body>'
+    '<a href="/x">x</a><form action="/login" method="post">'
+    '<input type="password" name="pwd"></form></body></html>'
+)
+_XHTML_DOC = (
+    '<?xml version="1.0" encoding="UTF-8"?>'
+    '<!DOCTYPE html><html xmlns="http://www.w3.org/1999/xhtml">'
+    '<head><title>X</title></head><body>'
+    '<form action="/go" method="post"><input name="q"></form></body></html>'
+)
+
+
+def _emits_xml_warning(fn) -> bool:
+    """Run fn() with all filters reset and report whether bs4 raised an
+    XMLParsedAsHTMLWarning (so this tests the parser fix itself, not the
+    process-wide filterwarnings backstop installed by crawler.py)."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        fn()
+    return any(isinstance(w.message, XMLParsedAsHTMLWarning) for w in caught)
+
+
+def test_make_soup_no_warning_on_sitemap():
+    p = HTMLParser()
+    assert not _emits_xml_warning(lambda: p.extract_links(_SITEMAP_XML, "https://example.com"))
+
+
+def test_make_soup_no_warning_on_rss():
+    p = HTMLParser()
+    assert not _emits_xml_warning(lambda: p.extract_links(_RSS_XML, "https://example.com"))
+
+
+def test_make_soup_no_warning_on_oembed():
+    p = HTMLParser()
+    # extract_forms + extract_comments also fed the HTML parser before the fix.
+    assert not _emits_xml_warning(lambda: p.extract_forms(_OEMBED_XML, "https://example.com"))
+    assert not _emits_xml_warning(lambda: p.extract_comments(_OEMBED_XML, "https://example.com"))
+
+
+def test_make_soup_html_path_intact():
+    """HTML still parses correctly — no behaviour regression on real pages."""
+    p = HTMLParser()
+    links = p.extract_links(_HTML_DOC, "https://example.com")
+    assert "/x" in links
+    forms = p.extract_forms(_HTML_DOC, "https://example.com")
+    assert len(forms) == 1
+    assert forms[0]["has_password_field"] is True
+
+
+def test_make_soup_xhtml_prolog_is_html():
+    """XHTML carries an <?xml?> prolog but has an <html> root → parse as HTML
+    so its form is still extracted (the prolog must not divert it to XML)."""
+    p = HTMLParser()
+    forms = p.extract_forms(_XHTML_DOC, "https://example.com")
+    assert len(forms) == 1
+    assert forms[0]["action"] == "/go"
+
+
+def test_make_soup_malformed_xml_degrades():
+    """Truncated / junk XML must not raise or warn."""
+    p = HTMLParser()
+    assert not _emits_xml_warning(
+        lambda: p.extract_links("<?xml version='1.0'?><urlset><url><loc>htt", "x")
+    )
+    assert p.extract_forms("<?xml broken <<<", "x") == []
 
 
 # ─── Stack-trace miner tests ──────────────────────────────────────────
