@@ -175,6 +175,26 @@ framework-recon, SPA mining, and the crawl spider.
 
 ---
 
+## Proxy / Network
+
+`--proxy <url>` routes **every** outbound HTTP/S request through one upstream proxy —
+recon, fingerprinting, framework-recon, SPA mining, the crawl, and the baseline probe.
+
+| Use case | Example | Notes |
+|---|---|---|
+| **TOR** | `--proxy socks5h://127.0.0.1:9050` | Scan from a different exit IP. `socks5h` resolves DNS *through* the proxy, so the target hostname never leaks. |
+| **Burp** | `--proxy http://127.0.0.1:8080` | Every request lands in Burp's history for inspection / replay. |
+| **mitmproxy** | `--proxy http://127.0.0.1:8080` | Record or rewrite traffic. |
+
+- Accepts `http://`, `https://`, `socks5://`, `socks5h://`. A bare `host:port` defaults to
+  `http://`. SOCKS/TOR support ships with the package (`httpx[socks]`).
+- Precedence: `--proxy` flag > `config.yaml` `proxy.url`.
+- **Fail-closed** — a malformed value aborts the scan, and a requested proxy is never
+  silently bypassed (no direct fallback), so a typo can't deanonymise a TOR scan.
+- `verify=False` is already set, so Burp/mitmproxy MITM certs work without importing a CA.
+
+---
+
 ## Attack Surface Analysis
 
 Automated summary generated from all extracted data:

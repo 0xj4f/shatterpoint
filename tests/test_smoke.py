@@ -4,6 +4,7 @@ import base64
 import json
 import time
 
+from shatterpoint.crawler import CrawlOrchestrator
 from shatterpoint.modules.extractor import Extractor
 from shatterpoint.modules.fingerprint import (
     Fingerprinter,
@@ -37,6 +38,7 @@ from shatterpoint.utils.auth import (
     warn_on_expiry,
 )
 from shatterpoint.utils.baseline import Baseline
+from shatterpoint.utils.proxy import normalize_proxy, resolve_proxy
 from shatterpoint.utils.stacktrace import (
     detect_framework as st_detect_framework,
 )
@@ -2143,6 +2145,98 @@ def test_spider_auth_headers_combined_and_origin_scoped():
     assert same["Cookie"] == "s=1"
     # cross-origin → nothing
     assert sp._auth_headers_for("http://evil.test/x") == {}
+
+
+# ─── Proxy resolution + plumbing tests ────────────────────────────────
+
+
+def test_normalize_proxy_bare_hostport_defaults_to_http():
+    """A bare host:port (Burp / mitmproxy) gets an http:// scheme."""
+    url, err = normalize_proxy("127.0.0.1:8080")
+    assert err is None
+    assert url == "http://127.0.0.1:8080"
+
+
+def test_normalize_proxy_preserves_socks5h():
+    """socks5h (TOR — DNS resolved through the proxy) is preserved verbatim."""
+    url, err = normalize_proxy("socks5h://127.0.0.1:9050")
+    assert err is None
+    assert url == "socks5h://127.0.0.1:9050"
+
+
+def test_normalize_proxy_preserves_explicit_http_and_https():
+    assert normalize_proxy("http://10.0.0.1:8080") == ("http://10.0.0.1:8080", None)
+    assert normalize_proxy("https://10.0.0.1:8443") == ("https://10.0.0.1:8443", None)
+
+
+def test_normalize_proxy_empty_is_no_proxy():
+    """Empty / blank / None means 'no proxy requested' — not an error."""
+    assert normalize_proxy(None) == (None, None)
+    assert normalize_proxy("") == (None, None)
+    assert normalize_proxy("   ") == (None, None)
+
+
+def test_normalize_proxy_rejects_bad_scheme():
+    url, err = normalize_proxy("ftp://127.0.0.1:21")
+    assert url is None
+    assert err and "scheme" in err
+
+
+def test_normalize_proxy_rejects_missing_host():
+    url, err = normalize_proxy("http://")
+    assert url is None
+    assert err and "host" in err
+
+
+def test_resolve_proxy_cli_beats_config():
+    """CLI --proxy overrides config['proxy']['url']."""
+    cfg = {"proxy": {"url": "http://config-proxy:8080"}}
+    assert resolve_proxy("socks5h://127.0.0.1:9050", cfg) == ("socks5h://127.0.0.1:9050", None)
+
+
+def test_resolve_proxy_falls_back_to_config():
+    cfg = {"proxy": {"url": "127.0.0.1:8080"}}
+    assert resolve_proxy(None, cfg) == ("http://127.0.0.1:8080", None)
+
+
+def test_resolve_proxy_none_when_unset():
+    assert resolve_proxy(None, {}) == (None, None)
+    assert resolve_proxy(None, {"proxy": {"url": None}}) == (None, None)
+
+
+def test_resolve_proxy_propagates_error():
+    """A malformed proxy is surfaced as an error so the caller aborts —
+    it must never silently fall back to a direct (deanonymising) connection."""
+    url, err = resolve_proxy(None, {"proxy": {"url": "ftp://x:1"}})
+    assert url is None
+    assert err
+
+
+def test_proxy_plumbed_into_orchestrator_and_spider():
+    """A resolved proxy reaches BOTH httpx clients: the recon client (via
+    CrawlOrchestrator.proxy_url) and the crawl client (via Spider.proxy_url).
+    This is what guarantees ALL traffic is routed through the proxy."""
+    cfg = {
+        "target": {"url": "http://t.test"},
+        "proxy": {"url": "socks5h://127.0.0.1:9050"},
+    }
+    orch = CrawlOrchestrator(cfg)
+    assert orch.proxy_url == "socks5h://127.0.0.1:9050"
+    assert orch.spider.proxy_url == "socks5h://127.0.0.1:9050"
+
+
+def test_proxy_absent_by_default():
+    """No proxy config → both clients connect directly (proxy_url is None)."""
+    orch = CrawlOrchestrator({"target": {"url": "http://t.test"}})
+    assert orch.proxy_url is None
+    assert orch.spider.proxy_url is None
+
+
+def test_spider_reads_proxy_from_config():
+    """Spider picks the proxy straight out of config['proxy']['url']."""
+    cfg = {"target": {"url": "http://t.test"}, "proxy": {"url": "http://127.0.0.1:8080"}}
+    sp = Spider(cfg, URLValidator("http://t.test"))
+    assert sp.proxy_url == "http://127.0.0.1:8080"
 
 
 # ─── Stack-trace miner tests ──────────────────────────────────────────

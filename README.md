@@ -6,7 +6,7 @@ OSCP-focused web reconnaissance crawler — maps attack surfaces, fingerprints t
 ╰─$ shatterpoint --help
 
 ╔═══════════════════════════════════════════════════════╗
-║       shatterpoint v1.0                               ║
+║       shatterpoint v1.3                               ║
 ║       Attack Surface Mapper & Fingerprinter           ║
 ╚═══════════════════════════════════════════════════════╝
 
@@ -14,7 +14,7 @@ usage: shatterpoint [-h] [-u URL] [-c CONFIG] [-d DEPTH] [-p PAGES]
                     [-t THREADS] [-o OUTPUT] [-v] [--no-fingerprint]
                     [--no-recon] [--spa] [--framework-recon]
                     [--timeout TIMEOUT] [--token TOKEN] [-H "Name: value"]
-                    [--version]
+                    [--proxy URL] [--version]
 
 shatterpoint — OSCP Recon Attack Surface Mapper
 
@@ -35,6 +35,7 @@ options:
   --token TOKEN         Bearer token for authenticated crawling
   -H, --header "Name: value"
                         Arbitrary auth header (repeatable; covers all auth types)
+  --proxy URL           Route ALL traffic through a proxy (TOR/Burp/mitmproxy)
   --version             show program's version number and exit
 
 Examples:
@@ -42,6 +43,7 @@ Examples:
   shatterpoint -u http://target.htb --token $JWT --framework-recon
   shatterpoint -u http://target.htb -H "X-API-Key: $KEY" -H "X-Tenant: acme"
   shatterpoint -u http://localhost:3001 --token $JWT --spa
+  shatterpoint -u http://target.htb --proxy socks5h://127.0.0.1:9050
   shatterpoint -c custom_config.yaml
 
 ```
@@ -136,6 +138,8 @@ options:
   -H, --header "Name: value"
                          Arbitrary auth header (repeatable). Covers all auth
                          types — Basic, API key, Cookie, NTLM/Negotiate, custom
+  --proxy URL            Route ALL traffic through a proxy (TOR / Burp /
+                         mitmproxy). http://, https://, socks5://, socks5h://
   --version              Show version
 ```
 
@@ -205,6 +209,37 @@ auth:
   headers:                    # arbitrary headers — same as repeated -H
     X-API-Key: "your-api-key"
     Cookie: "session=abc123"
+```
+
+---
+
+## Proxy
+
+Route **all** outbound traffic through a single proxy with `--proxy <url>` — to scan from a
+different IP (**TOR**), inspect every request (**Burp**), or record/rewrite them
+(**mitmproxy**). It covers everything: recon, fingerprinting, framework-recon, SPA bundle
+mining, the crawl, and the internal baseline probe.
+
+```bash
+# Burp / mitmproxy — a bare host:port defaults to http://
+shatterpoint -u http://target.htb --proxy http://127.0.0.1:8080
+
+# TOR — use socks5h so DNS is resolved *through* TOR (no DNS leak)
+shatterpoint -u http://target.htb --proxy socks5h://127.0.0.1:9050
+```
+
+- Accepts `http://`, `https://`, `socks5://`, `socks5h://`. SOCKS/TOR support ships with the
+  package (the `httpx[socks]` extra) — nothing else to install.
+- Precedence: `--proxy` flag > `config.yaml` `proxy.url`.
+- **Fail-closed:** a malformed proxy value aborts the scan, and a requested proxy is *never*
+  silently bypassed — so a typo can't deanonymise a TOR scan by falling back to direct.
+- TLS verification is already off (OSCP targets use self-signed certs), so Burp/mitmproxy
+  interception works without importing their CA.
+
+```yaml
+# config.yaml equivalent
+proxy:
+  url: null            # e.g. "socks5h://127.0.0.1:9050"; --proxy overrides this
 ```
 
 ---
