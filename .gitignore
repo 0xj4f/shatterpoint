@@ -47,3 +47,6 @@ output
 
 # hatch-vcs writes the resolved version here at build time; never commit.
 src/shatterpoint/_version.py
+
+# Private findings/logs on internal targets — this repo is public, never commit.
+internal-docs/
