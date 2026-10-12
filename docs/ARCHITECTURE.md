@@ -18,17 +18,20 @@ flowchart TD
         P15["Phase 1.5 · Tech path probing<br/>fingerprint known paths"]
         P16["Phase 1.6 · Landing-page body detection<br/>body/cookie/form fingerprints"]
         P17["Phase 1.7 · Framework deep recon<br/>(--framework-recon) CVE signal probes"]
-        P18["Phase 1.8 · SPA analysis<br/>(--spa) bundles · source maps · routes · secrets"]
+        P18["Phase 1.8 · SPA analysis<br/>(--spa) bundles + imported chunks · source maps · routes · RPC methods · secrets"]
     end
 
     P1 -->|"+ sitemap/robots → seed_urls"| P15
     P15 -->|technologies| P16
     P16 -->|"detected_techs · landing_html"| P17
     P17 --> P18
-    P18 -->|"+ SPA routes → seed_urls"| P2
+    P18 -->|"+ SPA routes → seed_urls"| P19
+
+    P19["Phase 1.9 · Browser crawl<br/>(--browser) headless Chromium · passive (GET-only)"]
+    P19 -->|"+ rendered/landed URLs + GET API calls → seed_urls"| P2
 
     P2["Phase 2 · Crawl<br/>async spider, domain-scoped"]
-    P2 -->|crawl_results| P3
+    P2 -->|"crawl_results (+ rendered pages from 1.9)"| P3
     P3["Phase 3 · Extract & analyze<br/>forms · emails · comments · APIs · auth · security headers · stack-trace mining"]
     P3 --> P4
     P4["Phase 4 · Fingerprint aggregate<br/>confidence scoring across all pages"]
@@ -46,6 +49,7 @@ flowchart TD
 | **1.6 — Landing body detection** | `recon_client.get(target)` · `HTMLParser.extract_forms` · `Fingerprinter.fingerprint_from_response` → `finalize_technologies` | `technologies` (merged) | `detected_techs`, `landing_html` |
 | **1.7 — Framework deep recon** | `FrameworkRecon.analyze` | `framework_recon` | — (CVE signals + manual pointers) |
 | **1.8 — SPA analysis** | `SPAAnalyzer.analyze` | `spa` | SPA routes → `seed_urls`; SPA endpoints → Phase 3 |
+| **1.9 — Browser crawl** | `BrowserCrawler.crawl` (Playwright, optional extra) | `browser` | rendered pages + in-scope GET API calls → `seed_urls`; rendered pages override their HTTP versions in `crawl_results`; `browser.api_calls` → Phase 3 endpoints |
 | **2 — Crawl** | `Spider.crawl(seed_urls)` | `all_urls` | `crawl_results` |
 | **3 — Extract & analyze** | `HTMLParser`, `Extractor`, `ReconModule.detect_*`, `mine_response` | `forms`, `api_endpoints`, `comments`, `emails`, `parameters`, `auth_mechanisms`, `security_headers`, `interesting_files`, `debug_exposure`, (+`technologies` if a stack trace reveals a framework) | `forms_by_url` |
 | **4 — Fingerprint aggregate** | `Fingerprinter.fingerprint_aggregate` → `finalize_technologies` | `technologies` (final) | — |
@@ -64,6 +68,7 @@ flowchart LR
     crawler --> fingerprint["modules/fingerprint.py<br/>tech detection + confidence"]
     crawler --> framework["modules/framework_recon.py<br/>CVE signal probes"]
     crawler --> spa["modules/spa.py<br/>SPA bundle mining"]
+    crawler --> browser["modules/browser.py<br/>headless Chromium (--browser)"]
     crawler --> parser["modules/parser.py<br/>HTML extraction"]
     crawler --> extractor["modules/extractor.py<br/>API/attack-surface"]
 
@@ -79,6 +84,8 @@ flowchart LR
     framework --> baseline
     spa --> extractor
     spa --> parser
+    browser --> auth
+    browser --> validator
     crawler --> validator
 ```
 
@@ -114,7 +121,8 @@ Every top-level key in the saved JSON, and the phase that fills it:
 | `technologies` | 1.5, 1.6, 3 (stack-trace), 4 |
 | `robots_txt`, `sitemap`, `security_txt`, `common_paths` | 1 |
 | `framework_recon` | 1.7 |
-| `spa` | 1.8 |
+| `spa` (incl. `rpc_methods`) | 1.8 |
+| `browser` (`pages`, `api_calls`, `external_hosts`, `blocked`) | 1.9 |
 | `all_urls` | 2 |
 | `forms`, `file_uploads`, `api_endpoints`, `comments`, `emails`, `parameters`, `interesting_files`, `auth_mechanisms`, `security_headers`, `debug_exposure` | 3 |
 | `attack_surface`, `scan_duration`, `pages_crawled` | 5 |

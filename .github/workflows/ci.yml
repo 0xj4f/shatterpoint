@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: ["**"]
   pull_request:
     branches: [main]
 
@@ -30,7 +30,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.11", "3.12", "3.13"]
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -43,8 +43,11 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Install package with dev deps
-        run: pip install ".[dev]"
+      - name: Install package with dev + browser deps
+        run: pip install ".[dev,browser]"
+
+      - name: Install headless Chromium
+        run: playwright install --with-deps --only-shell chromium
 
       - name: Run tests
         run: pytest tests/ -v

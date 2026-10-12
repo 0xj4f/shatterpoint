@@ -64,8 +64,16 @@ spa:
   auto_when_detected: false         # run SPA phase automatically if a framework is detected
   source_maps: true                 # probe .map files for every bundle
   extract_secrets: true             # curated regex for baked-in secrets
-  max_bundles: 20                   # hard cap per target
+  max_bundles: 60                   # hard cap per target (Vite apps ship ~50 chunks)
   max_bundle_size_bytes: 5242880    # 5 MB per bundle
+
+# Browser mode (optional) — render pages in headless Chromium (Phase 1.9).
+# Needs: pip install 'shatterpoint[browser]' && playwright install --only-shell chromium
+# Passive: never clicks or types; non-GET requests the app fires are blocked.
+browser:
+  enabled: false                    # same as --browser flag
+  max_pages: 30                     # pages rendered (seeds + links found on rendered pages)
+  wait_ms: 2000                     # settle time after load, for XHR / WebSocket traffic
 
 # Authentication (optional)
 # For authenticated crawling. Precedence: --token CLI > SHATTERPOINT_TOKEN env > this field.

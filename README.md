@@ -12,7 +12,7 @@ OSCP-focused web reconnaissance crawler — maps attack surfaces, fingerprints t
 
 usage: shatterpoint [-h] [-u URL] [-c CONFIG] [-d DEPTH] [-p PAGES]
                     [-t THREADS] [-o OUTPUT] [-v] [--no-fingerprint]
-                    [--no-recon] [--spa] [--framework-recon]
+                    [--no-recon] [--spa] [--framework-recon] [--browser]
                     [--timeout TIMEOUT] [--token TOKEN] [-H "Name: value"]
                     [--proxy URL] [--version]
 
@@ -31,6 +31,7 @@ options:
   --no-recon            Skip recon modules
   --spa                 Mine SPA bundles (React/Vue/Angular/Next.js/Nuxt)
   --framework-recon     Framework CVE signal-recon (Laravel/Django/Flask/...)
+  --browser             Also render pages in headless Chromium (passive)
   --timeout TIMEOUT     Request timeout in seconds
   --token TOKEN         Bearer token for authenticated crawling
   -H, --header "Name: value"
@@ -43,6 +44,7 @@ Examples:
   shatterpoint -u http://target.htb --token $JWT --framework-recon
   shatterpoint -u http://target.htb -H "X-API-Key: $KEY" -H "X-Tenant: acme"
   shatterpoint -u http://localhost:3001 --token $JWT --spa
+  shatterpoint -u http://localhost:3001 --spa --browser
   shatterpoint -u http://target.htb --proxy socks5h://127.0.0.1:9050
   shatterpoint -c custom_config.yaml
 
@@ -60,7 +62,8 @@ Single-pass recon against **one target domain**. Signal-only — it maps and det
 - 🔐 **Authenticated crawling** — bearer token (`--token`) or any header (`-H`), origin-scoped and redacted
 - 🧬 **Framework CVE signal-recon** (`--framework-recon`) — Laravel, Django, Flask, Spring Boot, Next.js, Voyager, Innoshop; maps exposures to CVEs with a "verify manually" disposition (never claims "vulnerable")
 - 🪲 **Stack-trace mining** — flags debug-mode error pages, leaked filesystem paths, framework versions, secrets/DB-URIs
-- 📦 **SPA bundle mining** (`--spa`) — source maps, client-side routes, baked secrets for React/Vue/Angular/Next/Nuxt
+- 📦 **SPA bundle mining** (`--spa`) — follows every Vite/ES-module chunk, source maps, client-side routes (incl. route-constant objects), RPC methods (WebSocket RPC clients such as Hydra), baked secrets for React/Vue/Angular/Next/Nuxt
+- 🌐 **Browser mode** (`--browser`, optional extra) — renders pages in headless Chromium: rendered forms, client-side redirects, live XHR/fetch/WebSocket calls, third-party hosts. Passive: never clicks, blocks non-GET
 - 🧷 **Splits** real auth mechanisms from security headers in the report
 - 📊 **Reports** structured JSON + rich CLI output
 
@@ -71,10 +74,37 @@ Single-pass recon against **one target domain**. Signal-only — it maps and det
 ### pipx (recommended)
 
 ```bash
+# Latest from GitHub
 pipx install git+https://github.com/0xj4f/shatterpoint.git
-pipx install -e . --force --python "$(which python3)"
 
+# Or from a local clone — editable, so code changes apply immediately
+pipx install -e . --python "$(which python3)"
 ```
+
+> pipx builds with **its own default Python** unless you pass `--python`, and `--force`
+> **ignores** `--python`. shatterpoint needs Python ≥ 3.11, so if pipx's default is older
+> (check with `pipx environment --value PIPX_DEFAULT_PYTHON`), rebuild with
+> `pipx reinstall shatterpoint --python "$(which python3)"` rather than `--force`.
+
+### Browser mode (optional)
+
+`--browser` needs Playwright and a headless Chromium build (~195 MB on disk). Add them to an
+existing install:
+
+```bash
+# pipx — adds Playwright to shatterpoint's environment;
+# --include-apps also puts the `playwright` command on your PATH
+pipx inject --include-apps shatterpoint playwright
+playwright install --only-shell chromium
+
+# pip / virtualenv
+pip install 'shatterpoint[browser]'
+playwright install --only-shell chromium
+```
+
+Quick check: `playwright --version` works, and a scan with `--browser` prints a
+`PHASE 1.9: Browser Crawl` section. Docker image size: the `browser` target is about 770 MB
+larger than the lean one (Chromium plus its system libraries).
 
 ### pip
 
@@ -82,13 +112,41 @@ pipx install -e . --force --python "$(which python3)"
 pip install git+https://github.com/0xj4f/shatterpoint.git
 ```
 
+### Docker
+
+```bash
+docker run --rm -v "$PWD/output:/app/output" 0xj4f/shatterpoint -u http://10.10.10.1
+```
+
+The published image is the lean one. For `--browser`, build the `browser` target from a clone
+(the image installs the wheel from `dist/`):
+
+```bash
+pip install build && python -m build --wheel
+docker build --target browser -t shatterpoint:browser .
+docker run --rm -v "$PWD/output:/app/output" shatterpoint:browser -u https://app.target.test --spa --browser
+```
+
 ### From source (dev)
 
 ```bash
 git clone https://github.com/0xj4f/shatterpoint.git
 cd shatterpoint
-pip install -e ".[dev]"
+pip install -e ".[dev,browser]"
+playwright install --only-shell chromium   # for the --browser end-to-end test
 ```
+
+### Running the tests
+
+```bash
+ruff check src/ tests/
+pytest tests/test_smoke.py -v            # whole suite, a few seconds
+pytest tests/test_smoke.py -k browser    # browser mode only (includes a real headless-Chromium run)
+pytest tests/test_smoke.py -k spa        # SPA mining only
+```
+
+Without Playwright the end-to-end browser test is **skipped** (shown as `s`) and everything else
+still runs. CI installs Chromium, so it always runs there.
 
 ---
 
@@ -131,8 +189,11 @@ options:
   --no-fingerprint       Skip technology fingerprinting
   --no-recon             Skip recon modules (robots, sitemap, path probing)
   --spa                  Mine SPA bundles (React/Vue/Angular/Next.js/Nuxt):
-                         source maps, client-side routes, baked secrets
+                         chunks, source maps, routes, RPC methods, secrets
   --framework-recon      Framework-specific CVE signal-recon (signal-only)
+  --browser              Also render pages in headless Chromium (Playwright):
+                         rendered DOM, client-side redirects, XHR/fetch/WS
+                         calls. Needs the [browser] extra (see Browser mode)
   --timeout TIMEOUT      Request timeout in seconds (default: 10)
   --token TOKEN          Bearer token; also reads $SHATTERPOINT_TOKEN / config
   -H, --header "Name: value"
@@ -143,7 +204,7 @@ options:
   --version              Show version
 ```
 
-> `--spa` and `--framework-recon` are opt-in. Without them, shatterpoint is a pure
+> `--spa`, `--framework-recon` and `--browser` are opt-in. Without them, shatterpoint is a pure
 > crawler + fingerprinter. SPA framework *detection* and a "rerun with --framework-recon"
 > hint still run on every scan; only the deeper mining/probing is gated behind the flags.
 
@@ -244,6 +305,56 @@ proxy:
 
 ---
 
+## Browser mode
+
+Some SPAs only reveal themselves at runtime: routes that redirect anonymous users to
+`/login`, API calls whose URLs are built in JavaScript, forms that only exist once React
+renders. `--browser` adds **Phase 1.9**, which opens each seed (the target, sitemap URLs and
+`--spa` routes) in headless Chromium and records what the app actually does.
+
+```bash
+# Install once (pip, Docker and more under Installation → Browser mode)
+pipx inject --include-apps shatterpoint playwright
+playwright install --only-shell chromium     # headless-only build: ~195 MB on disk vs ~360 MB full Chromium
+
+shatterpoint -u https://app.target.test --spa --browser
+```
+
+What it adds to the report (`browser` key + existing tables):
+
+- **Browser Pages** — every rendered path and where the app *landed* (`/admin → /login`
+  means auth-guarded; `/admin → /` means a gated route). Rendered pages replace their
+  empty-shell HTTP versions, so **forms, comments and inline endpoints** of the rendered
+  DOM flow into the normal Forms / API Endpoints tables.
+- **Backend calls** — XHR / fetch / EventSource / WebSocket URLs on the target's own site
+  (sibling subdomains such as an API gateway included), listed in API Endpoints as
+  `browser:<type>`. In-scope GET calls are also handed to the HTTP crawler.
+- **Browser network** — the other hosts the page contacted (CDNs, analytics, error
+  reporting), and any **blocked** requests.
+
+Notes:
+
+- **Passive:** it never clicks or types. Any non-GET request the app fires on its own
+  (analytics beacons, autosaves) is recorded and **blocked**, never sent. WebSocket frames
+  are not inspected or filtered — without clicks the app only does what it does on load.
+- Like a real user's browser, it talks to whatever hosts the app loads (CDNs, analytics,
+  API gateways). `--proxy` routes the browser too (`socks5h://` is passed to Chromium as
+  `socks5://`, which already resolves DNS through the proxy). Chromium does not support
+  SOCKS proxy authentication.
+- Auth from `--token` / `-H` is added only to requests for the target origin.
+- Up to `browser.max_pages` (30) pages, one at a time, `browser.wait_ms` (2000) settle time
+  each — expect roughly 3 s per page.
+
+```yaml
+# config.yaml equivalent
+browser:
+  enabled: false     # same as --browser
+  max_pages: 30
+  wait_ms: 2000
+```
+
+---
+
 ## Configuration
 
 Drop a `config.yaml` in your working directory to customize defaults:
@@ -292,8 +403,13 @@ spa:
   auto_when_detected: false
   source_maps: true
   extract_secrets: true
-  max_bundles: 20
+  max_bundles: 60
   max_bundle_size_bytes: 5242880
+
+browser:
+  enabled: false              # same as --browser
+  max_pages: 30
+  wait_ms: 2000
 
 auth:
   token: null                 # bearer; or --token / $SHATTERPOINT_TOKEN
@@ -331,7 +447,10 @@ shatterpoint/
 │   │   ├── parser.py           # HTML extraction (forms, links, comments)
 │   │   ├── extractor.py        # API/JS endpoint & attack surface analysis
 │   │   ├── fingerprint.py      # Technology detection engine
-│   │   └── recon.py            # robots.txt, sitemap, common paths, auth
+│   │   ├── recon.py            # robots.txt, sitemap, common paths, auth
+│   │   ├── framework_recon.py  # Framework CVE signal-recon (--framework-recon)
+│   │   ├── spa.py              # SPA bundle mining (--spa)
+│   │   └── browser.py          # Headless Chromium crawl (--browser, optional extra)
 │   ├── utils/
 │   │   ├── validator.py        # URL validation & scope enforcement
 │   │   └── formatter.py        # Rich CLI output & JSON reporting
@@ -415,10 +534,12 @@ Optional but recommended on the Development environment: require a reviewer to a
 
 ### Pull-request rules
 
-The `ci.yml` workflow blocks merges unless:
+The `ci.yml` workflow runs on **every push to any branch** (and on PRs into `main`), so a
+breaking change shows up before a PR exists. It blocks merges unless:
 
 - `ruff check src/ tests/` is clean.
-- `pytest tests/ -v` passes on Python 3.11, 3.12, 3.13.
+- `pytest tests/ -v` passes on Python 3.11, 3.12, 3.13 and 3.14. Playwright and headless Chromium
+  are installed in CI, so the `--browser` end-to-end test runs too.
 - `CHANGELOG.md` was modified in the PR (add a bullet under `[Unreleased]`).
 
 For PRs with no user-facing change (typos, internal refactors), add a line under `### Internal` rather than skipping the file.

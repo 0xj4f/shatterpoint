@@ -8,6 +8,7 @@ import warnings
 from bs4 import XMLParsedAsHTMLWarning
 
 from shatterpoint.crawler import CrawlOrchestrator
+from shatterpoint.modules.browser import BrowserCrawler
 from shatterpoint.modules.extractor import Extractor
 from shatterpoint.modules.fingerprint import (
     Fingerprinter,
@@ -18,10 +19,13 @@ from shatterpoint.modules.fingerprint import (
 from shatterpoint.modules.parser import HTMLParser
 from shatterpoint.modules.recon import ReconModule
 from shatterpoint.modules.spa import (
+    SPAAnalyzer,
     detect_framework,
     enumerate_bundles,
     extract_chunks,
+    extract_imports,
     extract_routes,
+    extract_rpc_methods,
     extract_secrets,
     extract_source_map_url,
     extract_state_dumps,
@@ -2242,6 +2246,160 @@ def test_spider_reads_proxy_from_config():
     assert sp.proxy_url == "http://127.0.0.1:8080"
 
 
+# ─── Browser mode (--browser) ─────────────────────────────────────────
+# Unit tests need no Playwright; the end-to-end test skips without it (CI).
+
+class _FakeRoute:
+    """Stands in for a Playwright Route: records abort/continue calls."""
+
+    def __init__(self, method, url, headers=None):
+        self.request = type("Req", (), {"method": method, "url": url, "headers": headers or {}})()
+        self.calls = []
+
+    async def abort(self):
+        self.calls.append(("abort", None))
+
+    async def continue_(self, headers=None):
+        self.calls.append(("continue", headers))
+
+
+def _browser(cfg=None, target="http://t.test"):
+    return BrowserCrawler({"target": {"url": target}, **(cfg or {})}, URLValidator(target))
+
+
+def test_browser_plumbed_into_orchestrator():
+    cfg = {
+        "target": {"url": "http://t.test"},
+        "browser": {"enabled": True},
+        "proxy": {"url": "socks5h://127.0.0.1:9050"},
+    }
+    orch = CrawlOrchestrator(cfg)
+    assert orch.browser.enabled
+    # Chromium has no socks5h:// — socks5:// already resolves DNS via the proxy
+    assert orch.browser.proxy == {"server": "socks5://127.0.0.1:9050"}
+
+
+def test_browser_off_by_default():
+    orch = CrawlOrchestrator({"target": {"url": "http://t.test"}})
+    assert not orch.browser.enabled
+    assert orch.browser.proxy is None
+
+
+def test_browser_flag_without_playwright_prints_install_hint(monkeypatch, capsys):
+    """--browser without Playwright exits 2 with the exact install command
+    (regression: Rich used to swallow `[browser]` as a markup tag)."""
+    import importlib.util
+    import sys
+
+    import pytest
+
+    from shatterpoint import crawler
+
+    real_find_spec = importlib.util.find_spec
+    monkeypatch.setattr(
+        importlib.util, "find_spec",
+        lambda name, *args: None if name == "playwright" else real_find_spec(name, *args),
+    )
+    monkeypatch.setattr(sys, "argv", ["shatterpoint", "-u", "http://t.test", "--browser"])
+    with pytest.raises(SystemExit) as exc:
+        crawler.main()
+    assert exc.value.code == 2
+    assert "pip install 'shatterpoint[browser]'" in capsys.readouterr().out
+
+
+def test_browser_route_blocks_non_get():
+    import asyncio
+    b = _browser()
+    route = _FakeRoute("POST", "http://t.test/api/orders")
+    asyncio.run(b._route(route))
+    assert route.calls == [("abort", None)]
+    assert b.report["blocked"] == [{"method": "POST", "url": "http://t.test/api/orders"}]
+
+
+def test_browser_route_sends_auth_to_target_origin_only():
+    import asyncio
+    b = _browser({"auth": {"token": "abc"}})
+    same = _FakeRoute("GET", "http://t.test/api/me", {"accept": "*/*"})
+    other = _FakeRoute("GET", "https://cdn.example.com/lib.js")
+    asyncio.run(b._route(same))
+    asyncio.run(b._route(other))
+    assert same.calls == [("continue", {"accept": "*/*", "Authorization": "Bearer abc"})]
+    assert other.calls == [("continue", None)]
+
+
+def test_browser_records_calls_on_site_and_other_hosts():
+    b = _browser(target="https://ui.target.test")
+
+    def req(url, kind):
+        return type("Req", (), {"url": url, "method": "GET", "resource_type": kind})()
+
+    b._on_request(req("https://ui.target.test/api/items", "fetch"))
+    b._on_request(req("https://gw.target.test/v1/quotes", "xhr"))  # sibling subdomain
+    b._on_request(req("https://www.google-analytics.com/g/collect", "fetch"))
+    b._on_request(req("https://fonts.example.com/font.woff2", "font"))
+    assert [c["url"] for c in b.report["api_calls"]] == [
+        "https://ui.target.test/api/items",
+        "https://gw.target.test/v1/quotes",
+    ]
+    assert b.report["external_hosts"] == ["gw.target.test", "www.google-analytics.com", "fonts.example.com"]
+
+
+def test_browser_end_to_end_renders_and_stays_passive():
+    """Real headless Chromium against a local tiny SPA: JS-injected links are
+    followed, fetch() calls recorded, client-side redirects keyed by where the
+    app landed, and the app's POST never reaches the server."""
+    import asyncio
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    import pytest
+    pytest.importorskip("playwright")
+
+    received = []
+    pages = {
+        "/": b"""<html><body><div id="root"></div><script>
+            const a = document.createElement('a'); a.href = '/rendered-only'; a.textContent = 'go';
+            document.getElementById('root').appendChild(a);
+            fetch('/api/items');
+            fetch('/api/save', {method: 'POST', body: '{}'});
+        </script></body></html>""",
+        "/rendered-only": b"<html><body><p>only reachable after JS runs</p></body></html>",
+        # Auth-guarded route: the router sends anonymous users to /login
+        "/guarded": b"<html><body><script>history.replaceState({}, '', '/login')</script></body></html>",
+        "/api/items": b'{"items": []}',
+    }
+
+    class Handler(BaseHTTPRequestHandler):
+        def _serve(self):
+            received.append((self.command, self.path))
+            body = pages.get(self.path)
+            self.send_response(200 if body else 404)
+            self.end_headers()
+            self.wfile.write(body or b"")
+
+        do_GET = do_POST = _serve
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    try:
+        b = _browser({"browser": {"enabled": True, "wait_ms": 500}}, target=base)
+        result = asyncio.run(b.crawl([base + "/", base + "/guarded"]))
+    finally:
+        server.shutdown()
+
+    assert 'href="/rendered-only"' in result[base + "/"].body  # rendered DOM, not the raw shell
+    assert base + "/rendered-only" in result  # JS-injected link followed
+    assert {"method": "GET", "url": base + "/api/items", "type": "fetch"} in b.report["api_calls"]
+    assert {"method": "POST", "url": base + "/api/save"} in b.report["blocked"]
+    assert ("POST", "/api/save") not in received  # blocked in the browser, never sent
+    assert base + "/guarded" not in result and base + "/login" in result
+    assert {"url": base + "/guarded", "final_url": base + "/login", "status": 200, "title": ""} in b.report["pages"]
+
+
 # ─── XML-aware parsing tests (no XMLParsedAsHTMLWarning) ──────────────
 
 _SITEMAP_XML = (
@@ -2804,6 +2962,136 @@ def test_spa_extract_state_nuxt():
 
 def test_spa_extract_state_none():
     assert extract_state_dumps("<html><body>nothing</body></html>") == {}
+
+
+# ─── Vite / modern-minifier SPA mining ────────────────────────────────
+# Vite 8 (rolldown/oxc) emits every plain string with backticks and splits
+# the app into ~50 chunks; Reactive Trader was invisible until these.
+
+def test_js_endpoints_backtick_strings():
+    js = "fetch(`/api/users`);x={a:`/api/v1/orders`};y=`/api/users/${id}/photo`"
+    urls = {e["url"] for e in Extractor().extract_js_endpoints(js, "http://t/app.js")}
+    assert {"/api/users", "/api/v1/orders", "/api/users/${id}/photo"} <= urls
+
+
+def test_js_endpoints_json_config_websocket_url():
+    # Runtime config injected into index.html (Reactive Trader's hydraUrl)
+    js = 'window.configOverrides = {"hydraUrl":"wss://gw.target.test","apiUrl":"https://api.target.test/v2"}'
+    urls = {e["url"] for e in Extractor().extract_js_endpoints(js, "http://t/")}
+    assert "wss://gw.target.test" in urls
+    assert "https://api.target.test/v2" in urls
+
+
+def test_js_endpoints_drop_code_fragments():
+    # Text *between* two string literals is code, not a URL
+    js = 'a="x"+(Zn.call(S,"y");b="/api/ok";c=`p`+n),new URL(n,t)}let h={get action(){`'
+    urls = {e["url"] for e in Extractor().extract_js_endpoints(js, "http://t/app.js")}
+    assert urls == {"/api/ok"}
+
+
+def test_spa_extract_routes_backtick_literal():
+    routes = extract_routes("{path:`/dashboard`,element:x}", "React")
+    assert [r["path"] for r in routes] == ["/dashboard"]
+
+
+def test_spa_extract_secrets_backtick_literal():
+    findings = extract_secrets("x={apiKey:`AIzaSyA1234567890abcdefghijklmnopqrstuv`}", "http://t/b.js")
+    assert any(f["type"] == "FIREBASE_CONFIG_APIKEY" for f in findings)
+
+
+def test_spa_enumerate_bundles_includes_modulepreload():
+    html = """
+    <script type="module" crossorigin src="/assets/index-a.js"></script>
+    <link rel="modulepreload" crossorigin href="/assets/vendor-b.js">
+    <link rel="stylesheet" href="/assets/index-c.css">
+    <link rel="modulepreload" href="https://cdn.example.com/x.js">
+    """
+    bundles = enumerate_bundles(html, "http://target.test/", URLValidator("http://target.test"), HTMLParser())
+    assert bundles == ["http://target.test/assets/index-a.js", "http://target.test/assets/vendor-b.js"]
+
+
+def test_spa_extract_imports_es_dynamic_and_vite_deps():
+    js = (
+        'const __vite__mapDeps=(i,m=__vite__mapDeps,d=(m.f||(m.f=["assets/Admin-1.js","assets/Admin-2.css"])));'
+        'import{a as b}from"./vendor-x.js";import"./polyfill-y.js";const P=()=>import(`./Page-z.js`);'
+    )
+    urls = extract_imports(js, "http://t.test/assets/index-a.js")
+    assert urls == [
+        "http://t.test/assets/vendor-x.js",
+        "http://t.test/assets/polyfill-y.js",
+        "http://t.test/assets/Page-z.js",
+        "http://t.test/assets/Admin-1.js",
+    ]
+
+
+def test_spa_parse_source_map_app_source_full_and_skips_node_modules():
+    long_app = "export const r = '/admin';" + " " * 500 + "fetch('/api/late')"
+    sm = json.dumps({
+        "version": 3,
+        "sources": ["src/App.tsx", "../node_modules/react/index.js"],
+        "sourcesContent": [long_app, "fetch('/api/library-noise')"],
+    })
+    parsed = parse_source_map(sm)
+    assert "/api/late" in parsed["app_source"]  # not cut at the 200-char preview
+    assert "library-noise" not in parsed["app_source"]
+
+
+def test_spa_extract_routes_resolves_route_constants():
+    # Minified: paths live in a constants object, <Route> references a key
+    js = (
+        "var R={admin:`/admin`,credit:`/credit`,unused:`/not-a-route`,home:`/`};"
+        "u(Route,{path:R.admin}),u(Route,{path:R.credit}),u(Route,{path:R.home})"
+    )
+    paths = [r["path"] for r in extract_routes(js, "React")]
+    assert paths == ["/admin", "/credit"]  # unused key skipped, "/" blocklisted
+    # Unminified source-map form: JSX path={ROUTES.x}
+    jsx = 'export const ROUTES = { sellSide: "/credit-sellside" }\n<Route path={ROUTES.sellSide} />'
+    assert [r["path"] for r in extract_routes(jsx, "React")] == ["/credit-sellside"]
+
+
+def test_spa_extract_rpc_methods_hydra():
+    js = (
+        "requestStream$({serviceName:`PricingService`,serviceVersion:`abc=`,"
+        "majorVersionContentAddress:`0xd4`,methodName:`getPriceUpdates`,inboundStream:`one`});"
+        "requestResponse({serviceName:`ExecutionService`,methodName:`executeTrade`});"
+        "requestResponse({serviceName:`ExecutionService`,methodName:`executeTrade`});"
+    )
+    assert extract_rpc_methods(js) == [
+        {"service": "PricingService", "method": "getPriceUpdates"},
+        {"service": "ExecutionService", "method": "executeTrade"},
+    ]
+
+
+def test_spa_analyzer_follows_vite_chunks():
+    """Entry bundle → imported chunk is fetched and mined too."""
+    import asyncio
+
+    import httpx
+
+    files = {
+        "/assets/index-a.js": 'import"./admin-b.js";',
+        "/assets/admin-b.js": "x({serviceName:`AdminService`,methodName:`reset`});fetch(`/api/admin/reset`)",
+    }
+
+    def handler(request):
+        body = files.get(request.url.path)
+        return httpx.Response(200, text=body) if body else httpx.Response(404)
+
+    v = URLValidator("http://t.test")
+    analyzer = SPAAnalyzer({"spa": {"enabled": True}}, v, Extractor(), HTMLParser())
+    html = '<div id="root"></div><script type="module" src="/assets/index-a.js"></script>'
+
+    async def go():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
+            return await analyzer.analyze(c, html, "http://t.test", [])
+
+    result = asyncio.run(go())
+    assert [b["url"] for b in result["bundles"]] == [
+        "http://t.test/assets/index-a.js",
+        "http://t.test/assets/admin-b.js",
+    ]
+    assert result["rpc_methods"] == [{"service": "AdminService", "method": "reset"}]
+    assert "/api/admin/reset" in {e["url"] for e in result["api_endpoints_from_bundles"]}
 
 
 def test_fingerprinter_version_extraction():

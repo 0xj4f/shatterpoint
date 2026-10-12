@@ -331,6 +331,8 @@ def print_summary(results: dict):
                     b.get("fetch_error") or "",
                 )
             console.print(table)
+            if len(bundles) > 20:
+                console.print(f"[dim]  … {len(bundles) - 20} more bundle(s) in the JSON report[/dim]")
 
         routes = spa.get("routes", [])
         if routes:
@@ -340,6 +342,16 @@ def print_summary(results: dict):
             for r in routes[:40]:
                 table.add_row(r.get("path", ""), r.get("source_pattern", ""))
             console.print(table)
+
+        rpc_methods = spa.get("rpc_methods", [])
+        if rpc_methods:
+            by_service: dict[str, list[str]] = {}
+            for m in rpc_methods:
+                by_service.setdefault(m["service"], []).append(m["method"])
+            tree = Tree(f"[bold magenta]SPA RPC Methods ({len(rpc_methods)})[/bold magenta]")
+            for service, methods in by_service.items():
+                tree.add(f"[bold white]{service}[/bold white]: {', '.join(methods)}")
+            console.print(tree)
 
         secrets = spa.get("secrets", [])
         if secrets:
@@ -358,6 +370,33 @@ def print_summary(results: dict):
         state = spa.get("state_dumps", {})
         if state:
             console.print(f"[bold magenta]State dumps:[/bold magenta] {', '.join(state.keys())}")
+
+    # Browser crawl (--browser). Backend calls are in the API Endpoints table.
+    browser = results.get("browser", {})
+    pages = browser.get("pages", [])
+    if pages:
+        console.print(
+            f"\n[bold blue]Browser:[/bold blue] {len(pages)} page(s) rendered, "
+            f"{len(browser.get('api_calls', []))} backend call(s)"
+        )
+        base = results.get("target", {}).get("base_url", "")
+        table = Table(title=f"Browser Pages ({len(pages)})", box=box.ROUNDED, border_style="blue")
+        table.add_column("Path", style="white")
+        table.add_column("Landed on (client-side)")
+        table.add_column("Status", style="cyan")
+        table.add_column("Title", style="dim", max_width=30)
+        for p in pages[:40]:
+            redirected = p["final_url"] != p["url"]
+            final = f"[yellow]{p['final_url'].removeprefix(base)}[/yellow]" if redirected else "[dim]same[/dim]"
+            table.add_row(p["url"].removeprefix(base), final, str(p["status"]), p["title"])
+        console.print(table)
+
+        tree = Tree("[bold blue]Browser network[/bold blue]")
+        if browser.get("external_hosts"):
+            tree.add(f"other hosts contacted: {', '.join(browser['external_hosts'])}")
+        for b in browser.get("blocked", [])[:20]:
+            tree.add(f"[red]blocked {b['method']}[/red] {b['url'][:100]}")
+        console.print(tree)
 
     # URL tree
     all_urls = results.get("all_urls", [])

@@ -24,6 +24,7 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Security",
     "Topic :: Internet :: WWW/HTTP",
 ]
@@ -42,6 +43,11 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "ruff>=0.3.0",
+]
+# --browser mode. After installing, fetch the browser once:
+#   playwright install --only-shell chromium
+browser = [
+    "playwright>=1.49",
 ]
 
 [project.urls]
