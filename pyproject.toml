@@ -43,6 +43,11 @@ dev = [
     "pytest-asyncio>=0.23",
     "ruff>=0.3.0",
 ]
+# --browser mode. After installing, fetch the browser once:
+#   playwright install --only-shell chromium
+browser = [
+    "playwright>=1.49",
+]
 
 [project.urls]
 Homepage = "https://github.com/0xj4f/shatterpoint"
