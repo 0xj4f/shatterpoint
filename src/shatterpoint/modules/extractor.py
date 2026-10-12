@@ -10,27 +10,31 @@ import re
 class Extractor:
     """Extracts API endpoints, JS URLs, and maps attack surface."""
 
-    # Patterns for finding endpoints in JavaScript
+    # Patterns for finding endpoints in JavaScript. Strings may be quoted with
+    # ", ' or ` — modern minifiers (Vite 8 / rolldown / oxc) emit backticks
+    # for every plain string, so every pattern accepts all three.
     JS_URL_PATTERNS = [
         # Quoted strings that look like paths
         re.compile(
-            r'''["']'''
-            r'''(/(?:api|rest|graphql|v[0-9]+|ajax|ws|webhook|service|endpoint)[^\s"'<>]*?)'''
-            r'''["']''',
+            r'''["'`]'''
+            r'''(/(?:api|rest|graphql|v[0-9]+|ajax|ws|webhook|service|endpoint)[^\s"'`<>]*?)'''
+            r'''["'`]''',
             re.IGNORECASE,
         ),
         # fetch() calls
-        re.compile(r'''fetch\s*\(\s*["']([^"']+?)["']''', re.IGNORECASE),
+        re.compile(r'''fetch\s*\(\s*["'`]([^"'`]+?)["'`]''', re.IGNORECASE),
         # XMLHttpRequest.open
-        re.compile(r'''\.open\s*\(\s*["'][A-Z]+["']\s*,\s*["']([^"']+?)["']''', re.IGNORECASE),
+        re.compile(r'''\.open\s*\(\s*["'`][A-Z]+["'`]\s*,\s*["'`]([^"'`]+?)["'`]''', re.IGNORECASE),
         # axios calls
-        re.compile(r'''axios\.(?:get|post|put|delete|patch)\s*\(\s*["']([^"']+?)["']''', re.IGNORECASE),
+        re.compile(r'''axios\.(?:get|post|put|delete|patch)\s*\(\s*["'`]([^"'`]+?)["'`]''', re.IGNORECASE),
         # jQuery AJAX
-        re.compile(r'''(?:\$\.(?:ajax|get|post|getJSON)|\$\.fn\.load)\s*\(\s*["']([^"']+?)["']''', re.IGNORECASE),
-        # url: "..." or endpoint: "..." patterns
-        re.compile(r'''(?:url|endpoint|api_?url|base_?url|href)\s*[:=]\s*["']([^"']+?)["']''', re.IGNORECASE),
+        re.compile(r'''(?:\$\.(?:ajax|get|post|getJSON)|\$\.fn\.load)\s*\(\s*["'`]([^"'`]+?)["'`]''', re.IGNORECASE),
+        # url: "..." / endpoint = "..." / JSON config {"apiUrl":"..."}
+        re.compile(r'''(?:url|endpoint|api_?url|base_?url|href)["'`]?\s*[:=]\s*["'`]([^"'`]+?)["'`]''', re.IGNORECASE),
         # Relative paths starting with /
-        re.compile(r'''["'](\/[a-zA-Z][a-zA-Z0-9_/\-]+?)["']'''),
+        re.compile(r'''["'`](\/[a-zA-Z][a-zA-Z0-9_/\-]+?)["'`]'''),
+        # WebSocket URLs (ws:// or wss://)
+        re.compile(r'''["'`](wss?://[^\s"'`<>]+)["'`]''', re.IGNORECASE),
     ]
 
     # Patterns indicating API endpoints in URLs
@@ -193,6 +197,8 @@ class Extractor:
             r'\{\{',  # Template variables
             r'^\s*function',
             r'\.(?:png|jpg|gif|svg|css|ico|woff|ttf)$',
+            r'^[+,.()]',  # Code between two strings, e.g. `+(a.call(` or `.concat(`
+            r'.*\s',  # Real URLs never contain whitespace; minified code does
         ]
 
         for pattern in skip_patterns:

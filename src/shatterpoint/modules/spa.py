@@ -2,10 +2,11 @@
 SPA Analyzer
 Static analysis of Single Page Application bundles.
 
-Pulls same-origin JS bundles referenced from the landing HTML, probes for
-source maps, and extracts client-side routes, API endpoints, webpack
-chunk maps, framework state dumps, and a curated set of baked-in
-secrets. No browser, no JS execution — pure regex + JSON parsing.
+Pulls same-origin JS bundles referenced from the landing HTML (plus the
+chunks they import), probes for source maps, and extracts client-side
+routes, API endpoints, RPC methods, webpack chunk maps, framework state
+dumps, and a curated set of baked-in secrets. No browser, no JS
+execution — pure regex + JSON parsing.
 
 The module is orchestration over existing helpers:
   - HTMLParser.extract_scripts for bundle enumeration
@@ -74,28 +75,29 @@ _SHELL_PATTERNS = {
 
 # Framework-specific route regexes. Minified bundles rename variables to
 # single letters, so patterns anchor on the literal `path:` / `path=`
-# tokens that survive minification.
+# tokens that survive minification. String literals may be quoted with
+# ", ' or ` (Vite 8 / rolldown / oxc emit backticks for plain strings).
 _ROUTE_PATTERNS = {
     "React": [
         # createBrowserRouter / createRoutesFromElements: {path:"/foo",...}
-        re.compile(r'\bpath\s*:\s*["\'](/[^"\']*)["\']'),
+        re.compile(r'\bpath\s*:\s*["\'`](/[^"\'`]*)["\'`]'),
         # JSX in unminified / dev builds: <Route path="/foo" ...>
         re.compile(r'<Route\s+[^>]*path=["\'](/[^"\']*)["\']', re.IGNORECASE),
     ],
     "Vue.js": [
-        re.compile(r'\bpath\s*:\s*["\'](/[^"\']*)["\']'),
+        re.compile(r'\bpath\s*:\s*["\'`](/[^"\'`]*)["\'`]'),
     ],
     "Angular": [
         # RouterModule.forRoot([{path:'foo', ...}])  (Angular strips leading /)
-        re.compile(r'\bpath\s*:\s*["\']([A-Za-z0-9_\-:/]+)["\']'),
+        re.compile(r'\bpath\s*:\s*["\'`]([A-Za-z0-9_\-:/]+)["\'`]'),
     ],
     "Next.js": [
         # Pages manifest fragments: "/admin":{"page":"/admin",...}
         re.compile(r'["\'](/[A-Za-z0-9_\-/\[\]]*)["\']\s*:\s*\{[^}]*page\s*:'),
-        re.compile(r'\bpath\s*:\s*["\'](/[^"\']*)["\']'),
+        re.compile(r'\bpath\s*:\s*["\'`](/[^"\'`]*)["\'`]'),
     ],
     "Nuxt": [
-        re.compile(r'\bpath\s*:\s*["\'](/[^"\']*)["\']'),
+        re.compile(r'\bpath\s*:\s*["\'`](/[^"\'`]*)["\'`]'),
     ],
 }
 
@@ -118,10 +120,10 @@ _SECRET_PATTERNS = [
     ("STRIPE_LIVE_PUB", re.compile(r'\b(pk_live_[0-9a-zA-Z]{24,})\b')),
     ("SLACK_TOKEN", re.compile(r'\b(xox[baprs]-[0-9A-Za-z\-]{10,})\b')),
     ("GITHUB_TOKEN", re.compile(r'\b(gh[pousr]_[0-9A-Za-z]{36,})\b')),
-    ("FIREBASE_CONFIG_APIKEY", re.compile(r'apiKey\s*:\s*["\'](AIza[0-9A-Za-z_\-]{35})["\']')),
-    ("GENERIC_API_KEY", re.compile(r'(?:API_KEY|api_key|apiKey)\s*[:=]\s*["\']([A-Za-z0-9_\-]{16,})["\']')),
-    ("GENERIC_SECRET", re.compile(r'(?:SECRET|secret)\s*[:=]\s*["\']([A-Za-z0-9_\-]{16,})["\']')),
-    ("GENERIC_TOKEN_ASSIGN", re.compile(r'(?:TOKEN|token)\s*[:=]\s*["\']([A-Za-z0-9_\-\.]{20,})["\']')),
+    ("FIREBASE_CONFIG_APIKEY", re.compile(r'apiKey\s*:\s*["\'`](AIza[0-9A-Za-z_\-]{35})["\'`]')),
+    ("GENERIC_API_KEY", re.compile(r'(?:API_KEY|api_key|apiKey)\s*[:=]\s*["\'`]([A-Za-z0-9_\-]{16,})["\'`]')),
+    ("GENERIC_SECRET", re.compile(r'(?:SECRET|secret)\s*[:=]\s*["\'`]([A-Za-z0-9_\-]{16,})["\'`]')),
+    ("GENERIC_TOKEN_ASSIGN", re.compile(r'(?:TOKEN|token)\s*[:=]\s*["\'`]([A-Za-z0-9_\-\.]{20,})["\'`]')),
 ]
 
 
@@ -134,6 +136,33 @@ _SOURCE_MAP_COMMENT = re.compile(r'//[#@]\s*sourceMappingURL\s*=\s*(\S+)')
 # Capture the {id:"name",...} object body.
 _WEBPACK_CHUNK_MAP = re.compile(r'\{((?:\s*\d+\s*:\s*["\'][A-Za-z0-9_\-]+["\']\s*,?\s*){2,})\}')
 _WEBPACK_CHUNK_ENTRY = re.compile(r'(\d+)\s*:\s*["\']([A-Za-z0-9_\-]+)["\']')
+
+
+# <link rel="modulepreload" href="/assets/x.js"> — Vite preloads the chunks
+# the entry needs; they're as much "the app" as the <script src> entry.
+_MODULEPRELOAD_TAG = re.compile(r'<link\b[^>]*\bmodulepreload\b[^>]*>', re.IGNORECASE)
+_HREF = re.compile(r'href\s*=\s*["\']([^"\']+)["\']', re.IGNORECASE)
+
+
+# Chunks a bundle pulls in: imports of sibling files (`from"./vendor-x.js"`,
+# `import("./Page-y.js")`) and Vite's preload list (`["assets/Page-y.js",...]`).
+_JS_IMPORT = re.compile(r'(?:from|import)\s*\(?\s*["\'`]\./([\w.\-]+\.js)["\'`]')
+_VITE_DEP = re.compile(r'["\'`]assets/([\w.\-]+\.js)["\'`]')
+
+
+# Route constants: routers often take paths from a constants object instead
+# of inline literals — `path:R.admin` (minified) / `path={ROUTES.admin}` (JSX)
+# with `R={admin:"/admin",...}` defined elsewhere. Only keys actually used
+# as a `path` are resolved, so unrelated "/..." strings never become routes.
+_ROUTE_REF = re.compile(r'\bpath\s*[:=]\s*\{?\s*[\w$]+\.([\w$]+)')
+_ROUTE_CONST = re.compile(r'\b([\w$]+)\s*:\s*["\'`](/[^"\'`]*)["\'`]')
+
+
+# RPC method descriptors in generated WebSocket clients (e.g. Adaptive Hydra):
+# {serviceName:"PricingService", ..., methodName:"getPriceUpdates"}.
+_RPC_METHOD = re.compile(
+    r'serviceName\s*:\s*["\'`](\w+)["\'`][^{}]{0,400}?methodName\s*:\s*["\'`](\w+)["\'`]'
+)
 
 
 def detect_framework(detected_techs: list[dict], html: str) -> tuple[str | None, bool]:
@@ -168,15 +197,20 @@ def detect_framework(detected_techs: list[dict], html: str) -> tuple[str | None,
 
 
 def enumerate_bundles(html: str, base_url: str, validator: URLValidator, html_parser: HTMLParser) -> list[str]:
-    """Return the list of same-origin <script src> URLs from the landing HTML.
+    """Return the same-origin <script src> and <link rel=modulepreload> URLs
+    from the landing HTML.
 
     CDN-hosted bundles are rejected so we never fetch off-target assets.
     """
-    scripts = html_parser.extract_scripts(html)
+    srcs = [ext.get("src", "") for ext in html_parser.extract_scripts(html).get("external", [])]
+    for tag in _MODULEPRELOAD_TAG.findall(html):
+        href = _HREF.search(tag)
+        if href:
+            srcs.append(href.group(1))
+
     bundles: list[str] = []
     seen: set[str] = set()
-    for ext in scripts.get("external", []):
-        src = ext.get("src", "")
+    for src in srcs:
         if not src:
             continue
         absolute = urljoin(base_url, src)
@@ -194,6 +228,17 @@ def enumerate_bundles(html: str, base_url: str, validator: URLValidator, html_pa
         seen.add(clean)
         bundles.append(clean)
     return bundles
+
+
+def extract_imports(bundle_text: str, bundle_url: str) -> list[str]:
+    """Return absolute URLs of the JS chunks a bundle imports.
+
+    Vite emits every chunk into the same directory as the entry, so each
+    file name resolves next to the bundle that references it (which also
+    keeps every result on the bundle's own origin).
+    """
+    names = _JS_IMPORT.findall(bundle_text) + _VITE_DEP.findall(bundle_text)
+    return [urljoin(bundle_url, name) for name in dict.fromkeys(names)]
 
 
 def extract_source_map_url(bundle_text: str, bundle_url: str) -> str | None:
@@ -217,9 +262,11 @@ def extract_source_map_url(bundle_text: str, bundle_url: str) -> str | None:
 def parse_source_map(sm_text: str, preview_chars: int = 200) -> dict | None:
     """Parse a source-map JSON document.
 
-    Returns {"sources": [...], "sources_count": N, "sources_preview": [{path, preview}]}
-    where the preview is a truncated snippet of the original file. Returns
-    None if the document isn't a parseable source map.
+    Returns {"sources": [...], "sources_count": N, "sources_preview": [{path, preview}],
+    "app_source": "..."} where the preview is a truncated snippet of the
+    original file and app_source is the full original code to mine — minus
+    node_modules, whose megabytes of library strings would drown the signal.
+    Returns None if the document isn't a parseable source map.
     """
     if not sm_text:
         return None
@@ -234,17 +281,21 @@ def parse_source_map(sm_text: str, preview_chars: int = 200) -> dict | None:
         return None
     sources_content = doc.get("sourcesContent") or []
     previews: list[dict] = []
+    app_parts: list[str] = []
     for idx, src_path in enumerate(sources):
         if not isinstance(src_path, str):
             continue
         content = ""
         if idx < len(sources_content) and isinstance(sources_content[idx], str):
-            content = sources_content[idx][:preview_chars]
-        previews.append({"path": src_path, "preview": content})
+            content = sources_content[idx]
+        previews.append({"path": src_path, "preview": content[:preview_chars]})
+        if "node_modules" not in src_path:
+            app_parts.append(content)
     return {
         "sources": [s for s in sources if isinstance(s, str)],
         "sources_count": len(previews),
         "sources_preview": previews,
+        "app_source": "\n".join(app_parts),
     }
 
 
@@ -269,7 +320,23 @@ def extract_routes(text: str, framework: str) -> list[dict]:
                 path = "/" + path
             seen.add(path)
             routes.append({"path": path, "source_pattern": f"{framework}#{pat_idx}"})
+
+    # Route constants (see _ROUTE_REF): resolve only keys used as a `path`
+    used_keys = set(_ROUTE_REF.findall(text))
+    for key, path in _ROUTE_CONST.findall(text):
+        if key in used_keys and path not in _ROUTE_BLOCKLIST and path not in seen and len(path) <= 200:
+            seen.add(path)
+            routes.append({"path": path, "source_pattern": "route-constant"})
     return routes
+
+
+def extract_rpc_methods(text: str) -> list[dict]:
+    """Extract RPC service/method pairs (see _RPC_METHOD).
+
+    Returns deduplicated [{service, method}] in order of appearance.
+    """
+    pairs = dict.fromkeys(_RPC_METHOD.findall(text or ""))
+    return [{"service": service, "method": method} for service, method in pairs]
 
 
 def extract_chunks(bundle_text: str) -> list[str]:
@@ -390,7 +457,7 @@ class SPAAnalyzer:
         self.auto_when_detected: bool = bool(spa_cfg.get("auto_when_detected", False))
         self.source_maps: bool = bool(spa_cfg.get("source_maps", True))
         self.extract_secrets_enabled: bool = bool(spa_cfg.get("extract_secrets", True))
-        self.max_bundles: int = int(spa_cfg.get("max_bundles", 20))
+        self.max_bundles: int = int(spa_cfg.get("max_bundles", 60))
         self.max_bundle_size: int = int(spa_cfg.get("max_bundle_size_bytes", 5 * 1024 * 1024))
         self.fetch_timeout: int = int(spa_cfg.get("fetch_timeout", 15))
         self.validator = validator
@@ -453,6 +520,7 @@ class SPAAnalyzer:
             "api_endpoints_from_bundles": [],
             "chunks": [],
             "secrets": [],
+            "rpc_methods": [],
             "state_dumps": {},
             "mining_ran": False,
         }
@@ -472,17 +540,17 @@ class SPAAnalyzer:
             print_finding("SPA", "No same-origin bundles found")
             return result
 
-        # Hard cap to prevent downloading a monorepo build
-        if len(bundle_urls) > self.max_bundles:
-            print_finding("SPA", f"Capping bundles at {self.max_bundles} (found {len(bundle_urls)})")
-            bundle_urls = bundle_urls[: self.max_bundles]
-
         combined_text_for_routes: list[str] = []
         seen_routes: set[str] = set()
         seen_endpoints: set[str] = set()
         seen_chunks: set[str] = set()
 
-        for bundle_url in bundle_urls:
+        # Work-list: each mined bundle can reveal more chunks (its imports).
+        # Hard cap to prevent downloading a monorepo build.
+        queue = list(bundle_urls)
+        seen_bundles = set(queue)
+        while queue and len(result["bundles"]) < self.max_bundles:
+            bundle_url = queue.pop(0)
             bundle_text, err = await self._fetch_text(client, bundle_url)
             entry: dict = {
                 "url": bundle_url,
@@ -495,6 +563,11 @@ class SPAAnalyzer:
             if bundle_text is None:
                 result["bundles"].append(entry)
                 continue
+
+            for chunk_url in extract_imports(bundle_text, bundle_url):
+                if chunk_url not in seen_bundles:
+                    seen_bundles.add(chunk_url)
+                    queue.append(chunk_url)
 
             # API endpoints via existing extractor
             eps = self.extractor.extract_js_endpoints(bundle_text, bundle_url)
@@ -536,9 +609,7 @@ class SPAAnalyzer:
                             entry["source_map_found"] = True
                             entry["source_files_count"] = parsed["sources_count"]
                             # Mine routes + endpoints from original source too
-                            full_source = "\n".join(
-                                p.get("preview", "") for p in parsed["sources_preview"]
-                            )
+                            full_source = parsed["app_source"]
                             if full_source:
                                 combined_text_for_routes.append(full_source)
                                 for ep in self.extractor.extract_js_endpoints(full_source, sm_url):
@@ -550,13 +621,16 @@ class SPAAnalyzer:
                                         "source": f"{bundle_url.rsplit('/', 1)[-1]}.map",
                                         "method_hint": "sourcemap",
                                     })
-                            print_finding("SPA", f"source map: {sm_url} ({parsed['sources_count']} sources)")
 
             result["bundles"].append(entry)
 
+        if queue:
+            print_finding("SPA", f"Capped at {self.max_bundles} bundles ({len(queue)} more not mined)")
+
+        big_text = "\n".join(combined_text_for_routes)
+
         # Routes
         if framework:
-            big_text = "\n".join(combined_text_for_routes)
             for route in extract_routes(big_text, framework):
                 if route["path"] in seen_routes:
                     continue
@@ -566,10 +640,16 @@ class SPAAnalyzer:
                     "source_pattern": route["source_pattern"],
                 })
 
+        # RPC methods (WebSocket RPC clients such as Hydra)
+        result["rpc_methods"] = extract_rpc_methods(big_text)
+
         # Summary output
+        maps_found = sum(1 for b in result["bundles"] if b["source_map_found"])
         print_finding("SPA", f"{len(result['bundles'])} bundle(s), "
+                             f"{maps_found} source map(s), "
                              f"{len(result['routes'])} route(s), "
                              f"{len(result['api_endpoints_from_bundles'])} endpoint(s), "
+                             f"{len(result['rpc_methods'])} RPC method(s), "
                              f"{len(result['secrets'])} secret(s), "
                              f"{len(result['chunks'])} chunk(s)")
 

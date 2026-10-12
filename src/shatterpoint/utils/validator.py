@@ -17,8 +17,10 @@ class URLValidator:
         self.scheme = parsed.scheme
         self.target_domain = parsed.netloc.lower()
         self.base_url = f"{parsed.scheme}://{parsed.netloc}"
-        extracted = tldextract.extract(target_url)
-        self.registered_domain = f"{extracted.domain}.{extracted.suffix}".lower()
+        # Private suffixes count (x.cloudfront.net is its own site, not
+        # "cloudfront.net"); strip(".") covers suffix-less hosts (localhost, IPs).
+        extracted = tldextract.extract(target_url, include_psl_private_domains=True)
+        self.registered_domain = f"{extracted.domain}.{extracted.suffix}".strip(".").lower()
 
     def is_in_scope(self, url: str) -> bool:
         """Check if URL belongs to the target domain (strict)."""

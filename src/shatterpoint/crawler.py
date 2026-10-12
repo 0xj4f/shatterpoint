@@ -9,6 +9,7 @@ Usage:
 
 import argparse
 import asyncio
+import importlib.util
 import sys
 import time
 import warnings
@@ -19,6 +20,7 @@ import yaml
 from bs4 import XMLParsedAsHTMLWarning
 
 from shatterpoint import __version__
+from shatterpoint.modules.browser import BrowserCrawler
 from shatterpoint.modules.extractor import Extractor
 from shatterpoint.modules.fingerprint import (
     Fingerprinter,
@@ -128,6 +130,9 @@ Examples:
   # SPA-only pass, skip noisy path probing on catch-all routers
   shatterpoint -u http://localhost:3001 --token $JWT --spa --no-recon
 
+  # Render the app in headless Chromium too (needs shatterpoint[browser])
+  shatterpoint -u http://localhost:3001 --spa --browser
+
   # Route ALL traffic through a proxy — inspect (Burp), rewrite (mitmproxy),
   # or scan from another IP (TOR). Bare host:port defaults to http://.
   shatterpoint -u http://target.htb --proxy http://127.0.0.1:8080
@@ -175,6 +180,16 @@ Environment:
             "Stack-trace mining of crawl responses runs every scan regardless."
         ),
     )
+    parser.add_argument(
+        "--browser",
+        action="store_true",
+        help=(
+            "Also render pages in headless Chromium (Playwright) to capture the "
+            "rendered DOM, client-side redirects and the XHR/fetch/WebSocket calls "
+            "the app makes. Passive: never clicks; non-GET requests are blocked. "
+            "Needs: pip install 'shatterpoint[browser]' && playwright install --only-shell chromium"
+        ),
+    )
     parser.add_argument("--timeout", type=int, help="Request timeout in seconds")
     parser.add_argument(
         "--token",
@@ -213,7 +228,7 @@ Environment:
 
 
 class CrawlOrchestrator:
-    """Sequences the nine-phase recon pipeline.
+    """Sequences the ten-phase recon pipeline.
 
     State that flows between phases lives on the instance; each
     ``_phaseN_*`` method reads and mutates it. :meth:`run` opens the shared
@@ -239,6 +254,7 @@ class CrawlOrchestrator:
         self.recon = ReconModule(config, self.validator.base_url)
         self.spa_analyzer = SPAAnalyzer(config, self.validator, self.extractor, self.html_parser)
         self.framework_recon = FrameworkRecon(config, self.validator)
+        self.browser = BrowserCrawler(config, self.validator)
 
         # Results container
         self.results = {
@@ -267,6 +283,7 @@ class CrawlOrchestrator:
             "spa": {},
             "framework_recon": {},
             "debug_exposure": {},
+            "browser": {},
         }
 
         # Cross-phase state (populated as phases run)
@@ -274,12 +291,13 @@ class CrawlOrchestrator:
         self.baseline = None
         self.landing_html: str = ""
         self.crawl_results: dict = {}
+        self.browser_pages: dict = {}
         self.all_forms: list[dict] = []
         self.unique_apis: list[dict] = []
         self.all_urls: list[str] = []
 
     async def run(self) -> dict:
-        """Open the shared recon client and drive all nine phases."""
+        """Open the shared recon client and drive all ten phases."""
         recon_headers = {"User-Agent": self.config.get("crawler", {}).get("user_agent", "")}
         auth_cfg = self.config.get("auth") or {}
         # Combined auth headers: bearer token (--token) + arbitrary -H headers,
@@ -306,6 +324,7 @@ class CrawlOrchestrator:
             await self._phase17_framework(recon_client)
             await self._phase18_spa(recon_client)
 
+        await self._phase19_browser()
         await self._phase2_crawl()
         self._phase3_extract()
         self._phase4_fingerprint()
@@ -452,11 +471,28 @@ class CrawlOrchestrator:
                 f"Added {len(self.results['spa']['routes'])} SPA route(s) as crawl seeds"
             )
 
+    async def _phase19_browser(self) -> None:
+        # ─── Phase 1.9: Browser crawl (--browser) ────────────────
+        # Renders the seeds (SPA routes included) in headless Chromium.
+        # URLs only the browser saw become HTTP-crawl seeds; the rendered
+        # pages replace their empty-shell HTTP versions after Phase 2.
+        if not self.browser.enabled:
+            return
+        print_section("PHASE 1.9: Browser Crawl")
+        self.browser_pages = await self.browser.crawl(self.seed_urls)
+        self.results["browser"] = self.browser.report
+        self.seed_urls += list(self.browser_pages)
+        self.seed_urls += [
+            c["url"] for c in self.browser.report["api_calls"]
+            if c["method"] == "GET" and self.validator.is_in_scope(c["url"])
+        ]
+
     async def _phase2_crawl(self) -> None:
         # ─── Phase 2: Crawl ─────────────────────────────────────────
         print_section("PHASE 2: Crawling & Discovery")
         self.seed_urls = list(set(self.seed_urls))
         self.crawl_results = await self.spider.crawl(self.seed_urls)
+        self.crawl_results.update(self.browser_pages)
 
     def _phase3_extract(self) -> None:
         # ─── Phase 3: Extract & Analyze ─────────────────────────────
@@ -540,11 +576,15 @@ class CrawlOrchestrator:
                     "content_type": crawl_result.content_type,
                 })
 
-        # Deduplicate API endpoints (includes SPA-mined endpoints)
+        # Deduplicate API endpoints (includes SPA-mined and browser-seen endpoints)
         spa_endpoints = self.results.get("spa", {}).get("api_endpoints_from_bundles", [])
+        browser_endpoints = [
+            {"url": c["url"], "source": f"browser:{c['type']}"}
+            for c in self.results["browser"].get("api_calls", [])
+        ]
         seen_apis = set()
         self.unique_apis = []
-        for api in all_api_endpoints + all_js_endpoints + spa_endpoints:
+        for api in all_api_endpoints + all_js_endpoints + spa_endpoints + browser_endpoints:
             key = api.get("url", "")
             if key not in seen_apis:
                 seen_apis.add(key)
@@ -690,6 +730,14 @@ def main():
         config.setdefault("spa", {})["enabled"] = True
     if args.framework_recon:
         config.setdefault("framework_recon", {})["enabled"] = True
+    if args.browser:
+        if importlib.util.find_spec("playwright") is None:
+            console.print(
+                "[bold red]ERROR:[/bold red] --browser needs Playwright: "
+                "pip install 'shatterpoint[browser]' && playwright install --only-shell chromium"
+            )
+            sys.exit(2)
+        config.setdefault("browser", {})["enabled"] = True
     if args.no_recon:
         config.setdefault("recon", {}).update({
             "robots_txt": False,
