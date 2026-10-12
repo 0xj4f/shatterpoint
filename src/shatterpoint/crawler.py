@@ -734,7 +734,8 @@ def main():
         if importlib.util.find_spec("playwright") is None:
             console.print(
                 "[bold red]ERROR:[/bold red] --browser needs Playwright: "
-                "pip install 'shatterpoint[browser]' && playwright install --only-shell chromium"
+                # \[ keeps Rich from eating [browser] as a markup tag
+                "pip install 'shatterpoint\\[browser]' && playwright install --only-shell chromium"
             )
             sys.exit(2)
         config.setdefault("browser", {})["enabled"] = True

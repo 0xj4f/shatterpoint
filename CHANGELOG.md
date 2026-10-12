@@ -9,6 +9,38 @@ Version numbers are produced at release time from the GitHub Actions
 `MAJOR_VERSION` and `MINOR_VERSION` variables; the patch component
 auto-increments. See [README — Release process](README.md) for details.
 
+## [1.3.2] - 2026-10-12
+
+### Added
+- **`--browser` — browser mode (new Phase 1.9).** Renders the seeds (target, sitemap, `--spa` routes) and the links found on rendered pages in headless Chromium via Playwright, an optional extra (`pip install 'shatterpoint[browser]'`, then `playwright install --only-shell chromium`). It records:
+  - where each route actually lands (`/admin → /login` = auth-guarded);
+  - the XHR/fetch/EventSource/WebSocket calls the app makes to its own site (sibling subdomains included);
+  - the other hosts it contacts.
+
+  Rendered pages replace their empty-shell HTTP versions, so SPA forms, comments and inline endpoints now reach the normal tables.
+  - **Passive:** it never clicks or types; non-GET requests are recorded and blocked, and downloads are refused.
+  - **Origin-scoped auth:** `--token`/`-H` go to the target origin only.
+  - **Proxy:** `--proxy` applies, and fails closed.
+  - Module: `modules/browser.py`.
+- **SPA: follows every chunk.** `--spa` now mines `<link rel="modulepreload">` bundles and the chunks each bundle imports: ES imports, dynamic `import()`, and Vite's `__vite__mapDeps` list. Reactive Trader went from 1 bundle mined to 46. `spa.max_bundles` default raised 20 → 60.
+- **SPA: RPC methods.** Generated WebSocket RPC clients (e.g. Adaptive Hydra: `serviceName` … `methodName`) are mined into `spa.rpc_methods` and shown as a per-service tree. Reactive Trader yields 39 methods; Juno yields 26.
+- **SPA: route constants.** Routes defined in a constants object (`path:R.admin` / `path={ROUTES.admin}` → `R={admin:"/admin"}`) are resolved. Only keys actually used as a `path` count.
+- **WebSocket URLs** (`ws://`/`wss://`) and JSON-style config keys (`{"apiUrl":"…"}`) are now extracted from JS, e.g. a runtime-config `hydraUrl` in `index.html`.
+
+### Fixed
+- **Backtick string literals were invisible.** Vite 8 / rolldown / oxc minify every plain string to `` `…` ``, and every JS regex (endpoints, routes, secrets) only accepted `"`/`'`. They now accept all three, which also surfaces parameterised template endpoints such as `` `/api/users/${id}/photo` ``.
+- **Source maps were mined only 200 characters per file.** The full original source is now mined, minus `node_modules`.
+- **Code fragments reported as endpoints.** Text *between* two string literals (`+(a.call(`, `.concat(`, anything containing whitespace) is no longer listed under API Endpoints.
+- `URLValidator.registered_domain` now handles hosts with no public suffix (`localhost`, IPs) and private suffixes (`x.cloudfront.net` is its own site).
+
+### Internal
+- **CI runs on every push to any branch**, not just `main`, so breakage shows up before a PR exists.
+  - The test job installs the `browser` extra plus headless Chromium, so the `--browser` end-to-end test runs in CI instead of skipping.
+  - Python 3.14 was added to the test matrix and the classifiers.
+- **Docker:** a new `browser` build target (`docker build --target browser .`) adds Playwright and headless Chromium on top of the lean `runtime` image. The release still publishes `runtime` only.
+- **README:** install instructions for browser mode with pipx (`pipx inject --include-apps shatterpoint playwright`), pip, Docker, and running the test suite. Also fixes the pipx dev-install line, where `--force` silently ignored `--python`.
+- 18 new tests, 236 total.
+
 ## [1.3.1] - 2026-06-29
 
 ### Fixed
@@ -171,7 +203,8 @@ First public release. The `1.0` line covers the full initial feature set: web re
 - Test suite: 76 fixture-based unit tests covering auth, baseline, dedup, fingerprint word-boundary, SPA framework detection, route extraction (React Router v6, Vue Router, Angular), source-map parsing, webpack chunk extraction, secret patterns, and HTTP security-header detection.
 - Project renamed from `0xj4f-webcrawler` to `shatterpoint`.
 
-[Unreleased]: https://github.com/0xj4f/shatterpoint/compare/v1.3.1...HEAD
+[Unreleased]: https://github.com/0xj4f/shatterpoint/compare/v1.3.2...HEAD
+[1.3.2]: https://github.com/0xj4f/shatterpoint/releases/tag/v1.3.2
 [1.3.1]: https://github.com/0xj4f/shatterpoint/releases/tag/v1.3.1
 [1.3.0]: https://github.com/0xj4f/shatterpoint/releases/tag/v1.3.0
 [1.2.0]: https://github.com/0xj4f/shatterpoint/releases/tag/v1.2.0
