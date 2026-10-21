@@ -49,8 +49,8 @@ flowchart TD
 | **1.6 — Landing body detection** | `recon_client.get(target)` · `HTMLParser.extract_forms` · `Fingerprinter.fingerprint_from_response` → `finalize_technologies` | `technologies` (merged) | `detected_techs`, `landing_html` |
 | **1.7 — Framework deep recon** | `FrameworkRecon.analyze` | `framework_recon` | — (CVE signals + manual pointers) |
 | **1.8 — SPA analysis** | `SPAAnalyzer.analyze` | `spa` | SPA routes → `seed_urls`; SPA endpoints → Phase 3 |
-| **1.9 — Browser crawl** | `BrowserCrawler.crawl` (Playwright, optional extra) | `browser` | rendered pages + in-scope GET API calls → `seed_urls`; rendered pages override their HTTP versions in `crawl_results`; `browser.api_calls` → Phase 3 endpoints |
-| **2 — Crawl** | `Spider.crawl(seed_urls)` | `all_urls` | `crawl_results` |
+| **1.9 — Browser crawl** | `BrowserCrawler.crawl` (Playwright, optional extra; `browser.local_storage` seeded on the target origin, redirected pages retried in-app when it is set) | `browser` | rendered pages + in-scope GET API calls → `seed_urls`; rendered pages override their HTTP versions in `crawl_results`; `browser.api_calls` → Phase 3 endpoints |
+| **2 — Crawl** | `Spider.crawl(seed_urls)` (+ concrete in-scope API paths from `spa.api_endpoints_from_bundles`, GET) | `all_urls` | `crawl_results` |
 | **3 — Extract & analyze** | `HTMLParser`, `Extractor`, `ReconModule.detect_*`, `mine_response` | `forms`, `api_endpoints`, `comments`, `emails`, `parameters`, `auth_mechanisms`, `security_headers`, `interesting_files`, `debug_exposure`, (+`technologies` if a stack trace reveals a framework) | `forms_by_url` |
 | **4 — Fingerprint aggregate** | `Fingerprinter.fingerprint_aggregate` → `finalize_technologies` | `technologies` (final) | — |
 | **5 — Attack surface** | `Extractor.analyze_attack_surface` | `attack_surface`, `scan_duration`, `pages_crawled` | — |

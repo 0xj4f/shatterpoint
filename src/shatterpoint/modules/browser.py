@@ -8,11 +8,16 @@ makes on its own (XHR / fetch / EventSource / WebSocket, third-party hosts).
 Passive by design: it never clicks or types, and any non-GET request the
 app fires is recorded and blocked, never sent.
 
+Logged-in SPAs: `browser.local_storage` (--browser-storage KEY=VALUE) seeds
+the app's localStorage on the target origin before its scripts run, e.g. the
+JWT a React app keeps under "token".
+
 Optional dependency:
     pip install 'shatterpoint[browser]'
     playwright install --only-shell chromium
 """
 
+import json
 from urllib.parse import urlparse
 
 from shatterpoint.modules.spider import CrawlResult
@@ -26,6 +31,10 @@ SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 
 # Playwright resource types that mean "the app is talking to a backend".
 API_TYPES = {"xhr", "fetch", "eventsource"}
+
+# In-app navigation, as when a user follows a link: the URL changes without a
+# reload, so session state the app restored in memory is kept.
+SOFT_NAVIGATE = "url => { history.pushState(null, '', url); dispatchEvent(new PopStateEvent('popstate')) }"
 
 
 class BrowserCrawler:
@@ -42,6 +51,7 @@ class BrowserCrawler:
         self.proxy = {"server": proxy_url.replace("socks5h://", "socks5://")} if proxy_url else None
         auth = config.get("auth") or {}
         self.auth_headers = build_auth_headers(auth.get("token"), auth.get("headers"))
+        self.local_storage = cfg.get("local_storage") or {}
         self.validator = validator
         self.report: dict = {"pages": [], "api_calls": [], "external_hosts": [], "blocked": []}
 
@@ -70,6 +80,15 @@ class BrowserCrawler:
             )
             await context.route("**/*", self._route)
             context.on("request", self._on_request)
+            if self.local_storage:
+                # Log the app in: seed its storage on the target origin only,
+                # before any page script runs. Values never reach the report.
+                origin, items = json.dumps(self.validator.base_url), json.dumps(self.local_storage)
+                await context.add_init_script(
+                    f"if (location.origin === {origin}) "
+                    f"for (const [k, v] of Object.entries({items})) localStorage.setItem(k, v)"
+                )
+                print_status(f"Seeding localStorage: {', '.join(self.local_storage)}")
 
             while queue and len(self.report["pages"]) < self.max_pages:
                 url = queue.pop(0)
@@ -78,6 +97,12 @@ class BrowserCrawler:
                 try:
                     response = await page.goto(url, wait_until="load")
                     await page.wait_for_timeout(self.wait_ms)  # let XHR / WebSocket traffic happen
+                    redirected = self.validator.normalize(page.url) != url
+                    if self.local_storage and redirected and self.validator.is_in_scope(page.url):
+                        # With a seeded session, a redirect is often an auth guard
+                        # that ran before the app restored it. Retry once in-app.
+                        await page.evaluate(SOFT_NAVIGATE, url)
+                        await page.wait_for_timeout(self.wait_ms)
                     html = await page.content()
                     title = await page.title()
                     links = await page.eval_on_selector_all("a[href]", "els => els.map(a => a.href)")

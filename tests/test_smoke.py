@@ -2400,6 +2400,111 @@ def test_browser_end_to_end_renders_and_stays_passive():
     assert {"url": base + "/guarded", "final_url": base + "/login", "status": 200, "title": ""} in b.report["pages"]
 
 
+def test_browser_storage_flag_reaches_config(monkeypatch):
+    """--browser-storage KEY=VALUE pairs land in config['browser']['local_storage']."""
+    import sys
+
+    import pytest
+
+    from shatterpoint import crawler
+
+    seen = {}
+
+    class Stop(Exception):
+        pass
+
+    async def fake_run(config):
+        seen.update(config)
+        raise Stop
+
+    monkeypatch.setattr(crawler, "run_crawler", fake_run)
+    monkeypatch.setattr(sys, "argv", [
+        "shatterpoint", "-u", "http://t.test",
+        "--browser-storage", "token=abc.def.ghi", "--browser-storage", "user={}",
+    ])
+    with pytest.raises(Stop):
+        crawler.main()
+    assert seen["browser"]["local_storage"] == {"token": "abc.def.ghi", "user": "{}"}
+
+
+def test_spa_api_endpoints_seed_the_http_crawl():
+    """Concrete in-scope API paths mined from bundles are GET-crawled; templates,
+    other hosts, plain routes and WebSocket URLs are not."""
+    import asyncio
+    orch = CrawlOrchestrator({"target": {"url": "http://t.test"}})
+    orch.results["spa"] = {"api_endpoints_from_bundles": [
+        {"url": "/api/orders"},
+        {"url": "/api/users/${id}"},
+        {"url": "https://cdn.other.test/api/x"},
+        {"url": "/dashboard"},
+        {"url": "wss://t.test/api/stream"},
+    ]}
+    seeds = []
+
+    async def fake_crawl(seed_urls):
+        seeds.extend(seed_urls)
+        return {}
+
+    orch.spider.crawl = fake_crawl
+    asyncio.run(orch._phase2_crawl())
+    assert sorted(seeds) == ["http://t.test", "http://t.test/api/orders"]
+
+
+def test_browser_storage_logs_in_an_spa_that_restores_its_session_late():
+    """Like deployed Vulntrade: the app reads its JWT from localStorage only after
+    the first render, so loading /portfolio directly bounces via /login. With
+    seeded storage the in-app retry reaches /portfolio and the app makes its
+    Bearer call; without it the crawl stays on /login and calls nothing."""
+    import asyncio
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    import pytest
+    pytest.importorskip("playwright")
+
+    app = b"""<html><body><script>
+        let authed = false;  // restored late, after the first render
+        function render() {
+          if (!authed && location.pathname !== '/login') history.replaceState(null, '', '/login');
+          if (authed && location.pathname === '/login') history.replaceState(null, '', '/dashboard');
+          if (authed && location.pathname === '/portfolio')
+            fetch('/api/portfolio', {headers: {Authorization: 'Bearer ' + localStorage.getItem('token')}});
+        }
+        addEventListener('popstate', render);
+        render();
+        setTimeout(() => { authed = !!localStorage.getItem('token'); render(); }, 100);
+    </script></body></html>"""
+    api_calls = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path.startswith("/api/"):
+                api_calls.append((self.path, self.headers.get("Authorization")))
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b'{"positions": []}' if self.path.startswith("/api/") else app)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{server.server_port}"
+
+    def landed_on(storage):
+        b = _browser({"browser": {"enabled": True, "wait_ms": 500, "local_storage": storage}}, target=base)
+        asyncio.run(b.crawl([base + "/portfolio"]))
+        return b.report["pages"][0]["final_url"]
+
+    try:
+        assert landed_on({}) == base + "/login"
+        assert api_calls == []
+        assert landed_on({"token": "test-jwt"}) == base + "/portfolio"
+    finally:
+        server.shutdown()
+    assert api_calls == [("/api/portfolio", "Bearer test-jwt")]
+
+
 # ─── XML-aware parsing tests (no XMLParsedAsHTMLWarning) ──────────────
 
 _SITEMAP_XML = (
