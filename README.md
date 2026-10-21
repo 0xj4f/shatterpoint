@@ -13,7 +13,8 @@ OSCP-focused web reconnaissance crawler — maps attack surfaces, fingerprints t
 usage: shatterpoint [-h] [-u URL] [-c CONFIG] [-d DEPTH] [-p PAGES]
                     [-t THREADS] [-o OUTPUT] [-v] [--no-fingerprint]
                     [--no-recon] [--spa] [--framework-recon] [--browser]
-                    [--timeout TIMEOUT] [--token TOKEN] [-H "Name: value"]
+                    [--browser-storage KEY=VALUE] [--timeout TIMEOUT]
+                    [--token TOKEN] [-H "Name: value"]
                     [--proxy URL] [--version]
 
 shatterpoint — OSCP Recon Attack Surface Mapper
@@ -32,6 +33,8 @@ options:
   --spa                 Mine SPA bundles (React/Vue/Angular/Next.js/Nuxt)
   --framework-recon     Framework CVE signal-recon (Laravel/Django/Flask/...)
   --browser             Also render pages in headless Chromium (passive)
+  --browser-storage KEY=VALUE
+                        Seed localStorage on the target origin (log an SPA in)
   --timeout TIMEOUT     Request timeout in seconds
   --token TOKEN         Bearer token for authenticated crawling
   -H, --header "Name: value"
@@ -62,8 +65,8 @@ Single-pass recon against **one target domain**. Signal-only — it maps and det
 - 🔐 **Authenticated crawling** — bearer token (`--token`) or any header (`-H`), origin-scoped and redacted
 - 🧬 **Framework CVE signal-recon** (`--framework-recon`) — Laravel, Django, Flask, Spring Boot, Next.js, Voyager, Innoshop; maps exposures to CVEs with a "verify manually" disposition (never claims "vulnerable")
 - 🪲 **Stack-trace mining** — flags debug-mode error pages, leaked filesystem paths, framework versions, secrets/DB-URIs
-- 📦 **SPA bundle mining** (`--spa`) — follows every Vite/ES-module chunk, source maps, client-side routes (incl. route-constant objects), RPC methods (WebSocket RPC clients such as Hydra), baked secrets for React/Vue/Angular/Next/Nuxt
-- 🌐 **Browser mode** (`--browser`, optional extra) — renders pages in headless Chromium: rendered forms, client-side redirects, live XHR/fetch/WebSocket calls, third-party hosts. Passive: never clicks, blocks non-GET
+- 📦 **SPA bundle mining** (`--spa`) — follows every Vite/ES-module chunk, source maps, client-side routes (incl. route-constant objects), RPC methods (WebSocket RPC clients such as Hydra), baked secrets for React/Vue/Angular/Next/Nuxt; concrete API paths it mines are fetched (GET) during the crawl
+- 🌐 **Browser mode** (`--browser`, optional extra) — renders pages in headless Chromium: rendered forms, client-side redirects, live XHR/fetch/WebSocket calls, third-party hosts; logged-in SPAs via `--browser-storage`. Passive: never clicks, blocks non-GET
 - 🧷 **Splits** real auth mechanisms from security headers in the report
 - 📊 **Reports** structured JSON + rich CLI output
 
@@ -194,6 +197,9 @@ options:
   --browser              Also render pages in headless Chromium (Playwright):
                          rendered DOM, client-side redirects, XHR/fetch/WS
                          calls. Needs the [browser] extra (see Browser mode)
+  --browser-storage KEY=VALUE
+                         Seed localStorage on the target origin before pages
+                         load (repeatable), e.g. token=$JWT for logged-in SPAs
   --timeout TIMEOUT      Request timeout in seconds (default: 10)
   --token TOKEN          Bearer token; also reads $SHATTERPOINT_TOKEN / config
   -H, --header "Name: value"
@@ -303,6 +309,23 @@ proxy:
   url: null            # e.g. "socks5h://127.0.0.1:9050"; --proxy overrides this
 ```
 
+### Record an OpenAPI spec of the crawl
+
+Point `--proxy` at `mitmdump`, then convert the recorded flows with
+[mitmproxy2swagger](https://github.com/0xj4f/mitmproxy2swagger):
+
+```bash
+mitmdump -p 8899 -w flows.mitm "~u ^https://app.target.test/api" &   # record only the API
+shatterpoint -u https://app.target.test --spa --browser --proxy http://127.0.0.1:8899
+kill %1                                                     # stop mitmdump, flushing the file
+mitmproxy2swagger -f flow -i flows.mitm -o openapi.yaml -p https://app.target.test/api
+# edit openapi.yaml: remove the "ignore:" prefix of the paths to keep, then run the same command again
+```
+
+The crawl is GET-only, so the spec covers the GET endpoints that were actually called. With
+`--spa`, the concrete API paths mined from the bundles are requested too, so they get recorded
+with their real responses. Add `--browser-storage` (see Browser mode) so pages render logged in.
+
 ---
 
 ## Browser mode
@@ -342,6 +365,19 @@ Notes:
   `socks5://`, which already resolves DNS through the proxy). Chromium does not support
   SOCKS proxy authentication.
 - Auth from `--token` / `-H` is added only to requests for the target origin.
+- **Logged-in SPAs** keep their token in `localStorage`, and their own JavaScript decides
+  whether you are logged in, so a header alone isn't enough. Seed the storage instead:
+
+  ```bash
+  export SHATTERPOINT_TOKEN='<jwt>'     # also sent as "Authorization: Bearer" by the HTTP crawler
+  shatterpoint -u https://app.target.test --spa --browser \
+    --browser-storage token="$SHATTERPOINT_TOKEN" --browser-storage 'user={}'
+  ```
+
+  The key names are the app's own: log in once in your browser and look under
+  DevTools → Application → Local Storage. Values are only set on the target origin and never
+  reach the report. With seeded storage, a page that redirects is retried once as an in-app
+  navigation, because many apps restore the session only after the first render.
 - Up to `browser.max_pages` (30) pages, one at a time, `browser.wait_ms` (2000) settle time
   each — expect roughly 3 s per page.
 
@@ -351,6 +387,7 @@ browser:
   enabled: false     # same as --browser
   max_pages: 30
   wait_ms: 2000
+  local_storage: {}  # same as --browser-storage, e.g. {token: "<jwt>", user: "{}"}
 ```
 
 ---

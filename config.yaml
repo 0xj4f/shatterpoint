@@ -74,6 +74,8 @@ browser:
   enabled: false                    # same as --browser flag
   max_pages: 30                     # pages rendered (seeds + links found on rendered pages)
   wait_ms: 2000                     # settle time after load, for XHR / WebSocket traffic
+  local_storage: {}                 # same as --browser-storage: seeded on the target origin
+    # token: "<jwt>"                  # e.g. a SPA that keeps its JWT in localStorage
 
 # Authentication (optional)
 # For authenticated crawling. Precedence: --token CLI > SHATTERPOINT_TOKEN env > this field.

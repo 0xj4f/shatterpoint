@@ -9,6 +9,15 @@ Version numbers are produced at release time from the GitHub Actions
 `MAJOR_VERSION` and `MINOR_VERSION` variables; the patch component
 auto-increments. See [README — Release process](README.md) for details.
 
+## [1.3.3] - 2026-10-19
+
+### Added
+- **`--browser-storage KEY=VALUE` (repeatable), for logged-in SPA crawls.** It seeds `localStorage` on the target origin before any page script runs, e.g. `--browser-storage token="$SHATTERPOINT_TOKEN"`.
+  - SPAs keep their JWT in storage and decide client-side whether you're logged in, so `--token` alone (a request header) leaves the browser on `/login`.
+  - Values are only set on the target origin and never reach the report. Config equivalent: `browser.local_storage`.
+  - With seeded storage, a page that client-side redirects is retried once as an in-app navigation (`history.pushState` + `popstate`). This is for apps that restore the session only after the first render, which otherwise bounce every direct page load to `/login`.
+- **`--spa` now fetches the concrete API paths it mines** (GET, in Phase 2). They are in-scope, carry no `${…}` templates, and look like an API (`/api/`, `/rest/`, `/v1/`, …), e.g. `/api/admin/users`. Through `--proxy`, their real responses (authenticated with `--token`) are recorded, which is how a crawl becomes an OpenAPI spec. README: "Record an OpenAPI spec of the crawl".
+
 ## [1.3.2] - 2026-10-12
 
 ### Added
@@ -203,7 +212,8 @@ First public release. The `1.0` line covers the full initial feature set: web re
 - Test suite: 76 fixture-based unit tests covering auth, baseline, dedup, fingerprint word-boundary, SPA framework detection, route extraction (React Router v6, Vue Router, Angular), source-map parsing, webpack chunk extraction, secret patterns, and HTTP security-header detection.
 - Project renamed from `0xj4f-webcrawler` to `shatterpoint`.
 
-[Unreleased]: https://github.com/0xj4f/shatterpoint/compare/v1.3.2...HEAD
+[Unreleased]: https://github.com/0xj4f/shatterpoint/compare/v1.3.3...HEAD
+[1.3.3]: https://github.com/0xj4f/shatterpoint/releases/tag/v1.3.3
 [1.3.2]: https://github.com/0xj4f/shatterpoint/releases/tag/v1.3.2
 [1.3.1]: https://github.com/0xj4f/shatterpoint/releases/tag/v1.3.1
 [1.3.0]: https://github.com/0xj4f/shatterpoint/releases/tag/v1.3.0

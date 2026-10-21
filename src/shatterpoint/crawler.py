@@ -190,6 +190,16 @@ Environment:
             "Needs: pip install 'shatterpoint[browser]' && playwright install --only-shell chromium"
         ),
     )
+    parser.add_argument(
+        "--browser-storage",
+        action="append",
+        metavar="KEY=VALUE",
+        help=(
+            "Seed localStorage on the target origin before pages load (repeatable), so "
+            "--browser crawls an SPA logged in, e.g. --browser-storage token=$JWT. "
+            "Values never reach the report."
+        ),
+    )
     parser.add_argument("--timeout", type=int, help="Request timeout in seconds")
     parser.add_argument(
         "--token",
@@ -490,6 +500,18 @@ class CrawlOrchestrator:
     async def _phase2_crawl(self) -> None:
         # ─── Phase 2: Crawl ─────────────────────────────────────────
         print_section("PHASE 2: Crawling & Discovery")
+        # Concrete API paths mined from the SPA bundles are fetched too (GET),
+        # so their responses are seen, e.g. by mitmproxy when --proxy is set.
+        # Added here rather than in 1.8 so the browser never renders JSON.
+        for endpoint in self.results["spa"].get("api_endpoints_from_bundles", []):
+            url = self.validator.normalize(endpoint["url"])
+            if (
+                url
+                and "${" not in url
+                and self.validator.is_in_scope(url)
+                and self.extractor.API_INDICATORS.search(url)
+            ):
+                self.seed_urls.append(url)
         self.seed_urls = list(set(self.seed_urls))
         self.crawl_results = await self.spider.crawl(self.seed_urls)
         self.crawl_results.update(self.browser_pages)
@@ -739,6 +761,9 @@ def main():
             )
             sys.exit(2)
         config.setdefault("browser", {})["enabled"] = True
+    for item in args.browser_storage or []:
+        key, _, value = item.partition("=")
+        config.setdefault("browser", {}).setdefault("local_storage", {})[key] = value
     if args.no_recon:
         config.setdefault("recon", {}).update({
             "robots_txt": False,
