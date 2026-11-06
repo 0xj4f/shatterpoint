@@ -64,6 +64,7 @@ Single-pass recon against **one target domain**. Signal-only — it maps and det
 - 🤖 **Parses** robots.txt, sitemap.xml, security.txt
 - 🔐 **Authenticated crawling** — bearer token (`--token`) or any header (`-H`), origin-scoped and redacted
 - 🧬 **Framework CVE signal-recon** (`--framework-recon`) — Laravel, Django, Flask, Spring Boot, Next.js, Voyager, Innoshop; maps exposures to CVEs with a "verify manually" disposition (never claims "vulnerable")
+- 🔑 **Baked-secret mining** — API keys, tokens, JWTs and private keys in inline scripts, crawled JS, `--spa` bundles and source maps (redacted)
 - 🪲 **Stack-trace mining** — flags debug-mode error pages, leaked filesystem paths, framework versions, secrets/DB-URIs
 - 📦 **SPA bundle mining** (`--spa`) — follows every Vite/ES-module chunk, source maps, client-side routes (incl. route-constant objects), RPC methods (WebSocket RPC clients such as Hydra), baked secrets for React/Vue/Angular/Next/Nuxt; concrete API paths it mines are fetched (GET) during the crawl
 - 🌐 **Browser mode** (`--browser`, optional extra) — renders pages in headless Chromium: rendered forms, client-side redirects, live XHR/fetch/WebSocket calls, third-party hosts; logged-in SPAs via `--browser-storage`. Passive: never clicks, blocks non-GET
@@ -415,6 +416,7 @@ extract:
   comments: true
   emails: true
   js_endpoints: true
+  secrets: true
 
 fingerprint:
   enabled: true

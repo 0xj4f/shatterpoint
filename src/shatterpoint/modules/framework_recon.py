@@ -39,7 +39,7 @@ from typing import TYPE_CHECKING
 
 import httpx
 
-from shatterpoint.utils.baseline import Baseline, fetch_baseline
+from shatterpoint.utils.baseline import REDIRECT_CODES, Baseline, fetch_baseline
 from shatterpoint.utils.formatter import print_finding, print_status
 
 if TYPE_CHECKING:
@@ -530,6 +530,9 @@ class FrameworkRecon:
             "probes": [],
             "manual_pointers": {},
             "summary": {"critical": 0, "high": 0, "medium": 0, "info": 0},
+            # Probes whose request failed (timeout, connection error). They
+            # prove nothing either way, so they're kept out of probes/summary.
+            "fetch_errors": [],
         }
 
         targets: list[str] = []
@@ -566,6 +569,9 @@ class FrameworkRecon:
                 if outcome is None:
                     baseline_drops += 1
                     continue
+                if outcome.fetch_error:
+                    result["fetch_errors"].append({"path": outcome.path, "error": outcome.fetch_error})
+                    continue
                 result["probes"].append(outcome.__dict__)
                 if outcome.severity in result["summary"]:
                     result["summary"][outcome.severity] += 1
@@ -582,6 +588,11 @@ class FrameworkRecon:
             print_status(
                 f"Framework recon: dropped {baseline_drops} probe(s) "
                 "(404 baseline or content-confirm gate)"
+            )
+        if result["fetch_errors"]:
+            print_status(
+                f"Framework recon: {len(result['fetch_errors'])} probe(s) failed to fetch "
+                "(not counted as findings)"
             )
 
         return result
@@ -619,21 +630,15 @@ class FrameworkRecon:
         body = response.text or ""
         body_lower = body.lower()
 
-        # Catch-all content baseline — only meaningful on 200s.
-        if response.status_code == 200 and baseline.matches(response.status_code, body):
-            return None
-
-        # Catch-all redirect baseline — a 3xx to the same place a bogus
-        # path redirects to (e.g. GitLab → /users/sign_in) is the app's
-        # "everything → login" handler, not a real finding. Without this,
-        # a mis-triggered profile floods criticals on redirect-heavy apps.
-        if response.is_redirect and baseline.is_catchall_redirect(
-            response.status_code, response.headers.get("location")
-        ):
+        # Catch-all answers (content baseline on 200, the "everything →
+        # login" redirect, a 401/403 wall on every path) are not findings.
+        # Without this, a mis-triggered profile floods criticals on
+        # redirect-heavy apps (e.g. GitLab → /users/sign_in).
+        if baseline.is_noise(response.status_code, body, response.headers.get("location")):
             return None
 
         # Only report status codes that meaningfully indicate presence.
-        if response.status_code not in (200, 301, 302, 307, 308, 401, 403):
+        if response.status_code not in (200, *REDIRECT_CODES, 401, 403):
             return None
 
         # Content-confirm gate: a 200 that lacks every marker is NOT the

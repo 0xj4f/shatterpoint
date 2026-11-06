@@ -12,10 +12,12 @@ Complete feature reference for **shatterpoint**.
 |---------|-------------|
 | **Async I/O** | Built on `httpx` + `asyncio` for non-blocking concurrent requests |
 | **Concurrency control** | Configurable semaphore (default: 15 concurrent requests) |
-| **Scope enforcement** | Strict single-domain — never leaves the target `netloc` |
-| **Redirect tracking** | Manual redirect handling up to N hops (default: 3), logs the full chain |
+| **Scope enforcement** | Strict single-domain — never leaves the target `netloc`, including on redirects: a hop to another host is recorded in the chain but not followed |
+| **Redirect tracking** | Manual redirect handling up to N hops (default: 3), logs the full chain; links on a redirected page resolve against where it landed |
 | **Depth limiting** | Configurable max crawl depth from seed URL |
-| **Page cap** | Safety limit on total pages crawled (default: 500) |
+| **Page cap** | Safety limit on total pages crawled (default: 500), exact even under concurrency |
+| **Rate-limit tolerance** | `429` (and `503` with `Retry-After`) is retried up to 3× honouring `Retry-After` (capped at 10 s). Pages still rate-limited are left out of the analysis with a warning, so a limiter's error page is never reported as app content |
+| **Stable output** | URLs are normalised (`http://h` = `http://h/`) and pages are analysed in URL order, so repeat scans of an unchanged target give the same report |
 | **Polite delay** | Configurable inter-request delay (default: 0.1s) |
 | **Self-signed certs** | TLS verification disabled — works with OSCP lab targets |
 | **Custom User-Agent** | Defaults to Firefox on Linux, fully configurable |
@@ -59,7 +61,13 @@ Complete feature reference for **shatterpoint**.
 
 ### Scripts
 - External script sources with integrity hashes
-- Inline script content (fed to JS endpoint extractor)
+- Inline script content (fed to JS endpoint extractor and secret scanner)
+
+### Baked Secrets
+- Curated regexes run over inline `<script>` blocks and every JS file the crawler fetches (no `--spa` needed), plus `--spa` bundles and source-map original source
+- Provider keys: AWS, Google/Firebase, Stripe (live, test, restricted), Slack, GitHub (classic + fine-grained), OpenAI, Anthropic, SendGrid, Twilio, Mailgun, Google OAuth client secret, Azure storage `AccountKey`, private-key blocks, JWTs
+- Generic assignments: `apiKey` / `api_key` / `x-api-key` / `apikey` (any casing, quoted keys, header calls such as `setRequestHeader("X-API-Key", …)`), `secret` / `clientSecret` / `secret_key`, `token`; obvious placeholders (`YOUR_API_KEY`, `xxxx`, `example`) are skipped
+- Values are redacted to `first4…last4` before they reach the report
 
 ### Meta Tags
 - All `<meta>` attributes (name, property, http-equiv, content, charset)
@@ -104,11 +112,11 @@ Custom signatures can be added to `signatures/fingerprints.yaml`.
 ### robots.txt
 - Fetches and parses `robots.txt`
 - Extracts `Disallow`, `Allow`, and `Sitemap` directives
-- Disallowed paths added as crawl seeds
+- Disallowed paths added as crawl seeds (pattern rules are cut at the first `*` / `$`, so `/admin/*.php$` seeds `/admin/`)
 
 ### sitemap.xml
-- Parses `sitemap.xml`, `sitemap_index.xml`, `.gz` variants
-- Handles XML namespaces and sitemap indexes (recursive)
+- Tries the `Sitemap:` URLs from robots.txt first, then `sitemap.xml`, `sitemap_index.xml`, `.gz` variants
+- Handles XML namespaces and sitemap indexes (in-scope children only, each fetched once, nesting capped at 3 levels)
 - Regex fallback for malformed XML
 - Discovered URLs added as crawl seeds
 
@@ -125,13 +133,15 @@ Custom signatures can be added to `signatures/fingerprints.yaml`.
 - **CMS files**: `/xmlrpc.php`, `/CHANGELOG.txt`, `/README.txt`
 - **Dev tools**: `/actuator`, `/console`, `/_debug`, `/_profiler`
 
-Responses categorized as: **200 OK**, **Redirect** (with location), **Protected** (401/403).
+Responses categorized as: **200 OK**, **Redirect** (301/302/303/307/308, with location), **Protected** (401/403).
+Anything that matches how the target answers a random bogus path (soft-404 200, "everything → login"
+redirect, a 401/403 wall in front of every path) is dropped as noise.
 
 ### Authentication Detection
 Passive identification only — no attacks:
 - **HTTP Auth**: Basic, Digest, NTLM, Kerberos/Negotiate, Bearer
 - **Login forms**: Password field detection with CSRF token check
-- **Session cookies**: Name pattern matching with flag analysis (HttpOnly, Secure, SameSite)
+- **Session cookies**: Cookie-name pattern matching (`session`, `sid`, `auth`, `token`, …) with flags read from the parsed attributes (HttpOnly, Secure, SameSite)
 
 Security headers (CSP, HSTS, X-Content-Type-Options, X-XSS-Protection, Permissions-Policy,
 X-Frame-Options, Referrer-Policy, COOP/COEP/CORP) are reported **separately** from auth

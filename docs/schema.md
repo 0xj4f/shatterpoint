@@ -26,6 +26,7 @@ The output report is a single JSON object saved to `./output/recon_{domain}_{tim
   "security_txt": { ... },
   "common_paths": [ ... ],
   "all_urls": [ ... ],
+  "secrets": [ ... ],
   "attack_surface": { ... }
 }
 ```
@@ -225,6 +226,25 @@ For protected paths:
   "comment": "TODO: remove debug endpoint /api/debug",
   "keywords": ["todo", "debug", "api"]
 }
+```
+
+### `secrets[]`
+Baked secrets found in JS: `--spa` bundles and source maps, plus inline `<script>` blocks and JS files the crawler fetched (always on; `extract.secrets: false` disables the crawl-side scan). Deduplicated on `type` + `value_redacted`; raw values are never stored. `spa.secrets` still holds the `--spa` subset.
+```json
+{
+  "type": "GENERIC_API_KEY",
+  "value_redacted": "sk3y…9f2a",
+  "bundle": "main-abc123.js",
+  "url": "http://10.10.10.1/assets/main-abc123.js",
+  "source": "bundle"
+}
+```
+`source` is one of `bundle` (`--spa` bundle), `sourcemap` (original source from a `.map`), `inline` (inline `<script>`, incl. `__NEXT_DATA__` / `__NUXT__` and `--browser` rendered pages), `js` (JS file fetched by the crawler).
+
+### `framework_recon.fetch_errors[]`
+Framework probes whose request failed (timeout, connection error). They prove nothing either way, so they are listed here instead of in `framework_recon.probes` and are not counted in `framework_recon.summary`.
+```json
+{ "path": "/.env", "error": "timeout" }
 ```
 
 ### `attack_surface`

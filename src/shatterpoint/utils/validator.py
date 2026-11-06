@@ -53,8 +53,9 @@ class URLValidator:
             if parsed.scheme not in ("http", "https"):
                 return None
 
-            # Normalize: lowercase domain, keep path as-is
-            normalized = f"{parsed.scheme}://{parsed.netloc.lower()}{parsed.path}"
+            # Normalize: lowercase domain, keep path as-is. An empty path is
+            # the root: "http://h" and "http://h/" are one page, not two.
+            normalized = f"{parsed.scheme}://{parsed.netloc.lower()}{parsed.path or '/'}"
             if parsed.query:
                 normalized += f"?{parsed.query}"
 

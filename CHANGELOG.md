@@ -9,6 +9,40 @@ Version numbers are produced at release time from the GitHub Actions
 `MAJOR_VERSION` and `MINOR_VERSION` variables; the patch component
 auto-increments. See [README — Release process](README.md) for details.
 
+## [v1.3.4]
+
+### Added
+- **Baked secrets are mined without `--spa`.** Inline `<script>` blocks (incl. `__NEXT_DATA__` / `__NUXT__` and `--browser` rendered pages) and JS files the crawler fetches are now scanned. Results land in a new top-level `secrets` list, deduplicated and tagged with a `source` (`bundle` / `sourcemap` / `inline` / `js`); `spa.secrets` is unchanged. Toggle: `extract.secrets`.
+- **`--spa` scans source-map original source for secrets**, not just the minified bundle.
+- **More secret patterns:** OpenAI, Anthropic, SendGrid, Twilio, Mailgun, GitHub fine-grained PATs, Google OAuth client secrets, Azure storage `AccountKey`, Stripe test/restricted keys, private-key blocks, JWTs.
+
+### Changed
+- **Generic API-key matching is wider:** any casing of `apiKey` / `api_key` / `api-key` / `x-api-key` / `apikey`, quoted object keys and header calls (`setRequestHeader("X-API-Key", …)`), and values containing `.` `/` `+` `=`. `secret` also matches `clientSecret` / `secret_key`. Obvious placeholders (`YOUR_API_KEY`, `xxxx`, `example`) are skipped.
+- The spider now keeps `application/javascript` response bodies. They are only used for the secret scan; link extraction and the HTML extractors still skip them.
+- The "Baked Secrets" table is shown whenever secrets are found, not only under the SPA section, and gains a Source column.
+- **Rate-limited responses are retried.** Every request to the target retries `429` (and `503` carrying `Retry-After`) up to 3 times, honouring `Retry-After` (capped at 10 s). Pages still rate-limited are left out of the analysis with a warning. Module: `utils/http.py`.
+- `framework_recon.fetch_errors` lists framework probes whose request failed.
+
+### Fixed
+- **A rate limiter's error page was treated as the app.** On a target that answers bursts with `429` (nginx `limit_req`), the 429 page became the landing HTML, so SPA/framework detection flipped from run to run, and crawled 429 pages fed forms, comments and fingerprinting.
+- **The root page was crawled twice** (`http://host` and `http://host/`), duplicating findings and inflating fingerprint confidence. URLs with an empty path now normalise to `/`.
+- **Reports differed between identical scans.** Seeds were de-duplicated through a `set` and pages analysed in fetch-completion order; both are now ordered, so "first wins" fields and list order are stable.
+- **The crawler followed redirects off the target.** A redirect to another host is now recorded but not followed, so that host's forms, emails and links are no longer reported as the target's. Links on a redirected page now resolve against the page it landed on.
+- **Pages beyond `max_depth` blocked later discovery.** A link first seen too deep was marked as queued and then dropped, so it was never crawled even when a shallower page linked it.
+- **`max_pages` was overshot** by up to the concurrency level.
+- **Sitemap parsing could recurse without end** when a sitemap index child failed (the child fell back to `/sitemap.xml`, the index itself). Children are fetched once, in scope only, nested at most 3 levels; `Sitemap:` URLs from robots.txt are now used.
+- **robots.txt pattern rules were crawled literally** (`/admin/*.php$`); only the literal prefix is seeded now.
+- **A 401/403 wall flooded "exists but protected".** Common-path, fingerprint and framework probes now drop 401/403 responses that match the answer to a random bogus path. The common-path probe also reports `303` redirects.
+- **Failed framework probes were counted as findings** (e.g. a timeout on `/.env` printed as `[CRITICAL] [0] /.env` and counted in the summary).
+- **Session-cookie false positives.** The session hint was matched against the whole `Set-Cookie` line (`theme=dark; Path=/authors` → "auth"), and flags by substring. Now the cookie name and the parsed attributes are used.
+- **Binary interesting files and header-only evidence were skipped.** A `/backup.sql` served as `application/octet-stream`, or an empty `401` with `WWW-Authenticate: Basic`, had no text body and was dropped before analysis.
+- **Source-map URL with a query string** became `app.js?v=3.map`; it is now `app.js.map?v=3`.
+- **Parameterised SPA routes** (`/users/:id`, `/posts/[slug]`, `/docs/*`) were crawled as literal URLs; they stay in `spa.routes` but are no longer seeded.
+
+### Performance
+- Phase 3 parses each page's HTML once and shares it across the form, comment and script extractors (it was parsed 3–4 times).
+- Fingerprint signature regexes are compiled once instead of per page.
+
 ## [1.3.3] - 2026-10-19
 
 ### Added

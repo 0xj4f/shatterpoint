@@ -34,7 +34,7 @@ from urllib.parse import urlparse
 if TYPE_CHECKING:
     import httpx
 
-_REDIRECT_CODES = (301, 302, 303, 307, 308)
+REDIRECT_CODES = (301, 302, 303, 307, 308)
 
 
 def _loc_path(location: str | None) -> str | None:
@@ -81,12 +81,33 @@ class Baseline:
                 return True
         return False
 
+    def is_noise(self, status_code: int, body: str = "", location: str | None = None) -> bool:
+        """True when a path-probe response is just the target's answer to
+        ANY path, so it says nothing about the probed path existing.
+
+        Shared by every path prober (common paths, fingerprint paths,
+        framework profiles); each still applies its own acceptance rules
+        afterwards.
+          - 200 matching the content baseline (catch-all router / soft 404);
+          - 401/403 when a bogus path gets the same status and body (a WAF
+            or auth wall in front of everything — "exists but protected"
+            would otherwise fire for every probe);
+          - 3xx to the same place a bogus path redirects to.
+        """
+        if status_code in REDIRECT_CODES:
+            return self.is_catchall_redirect(status_code, location)
+        if status_code == 200:
+            return self.matches(status_code, body)
+        if status_code in (401, 403):
+            return status_code == self.status_code and self.matches(status_code, body)
+        return False
+
     def is_catchall_redirect(self, status_code: int, location: str | None) -> bool:
         """True if this 3xx goes to the same place a bogus path does —
         i.e. the app's catch-all "→ login" handler, not a real finding."""
         if not self.available or not self.redirect_location:
             return False
-        if status_code not in _REDIRECT_CODES:
+        if status_code not in REDIRECT_CODES:
             return False
         return _loc_path(location) == self.redirect_location
 
@@ -124,7 +145,7 @@ async def fetch_baseline(client: httpx.AsyncClient, base_url: str) -> Baseline:
         return Baseline(available=False, status_code=0, body_hash="", body_length=0)
 
     redirect_location = None
-    if immediate.status_code in _REDIRECT_CODES:
+    if immediate.status_code in REDIRECT_CODES:
         redirect_location = _loc_path(immediate.headers.get("location"))
         # Also follow to capture the final body, so the content-baseline
         # still works for callers that follow redirects (fingerprint probes).

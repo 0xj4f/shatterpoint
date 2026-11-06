@@ -29,6 +29,7 @@ from shatterpoint.modules.spa import (
     extract_secrets,
     extract_source_map_url,
     extract_state_dumps,
+    merge_secrets,
     parse_source_map,
 )
 from shatterpoint.modules.spider import Spider
@@ -3104,6 +3105,215 @@ def test_spa_extract_secrets_backtick_literal():
     assert any(f["type"] == "FIREBASE_CONFIG_APIKEY" for f in findings)
 
 
+# ─── Widened secret mining ────────────────────────────────────────────
+# Fake keys are assembled at runtime so the test file itself never trips
+# a secret scanner.
+
+def _types(text, source="bundle"):
+    return {f["type"] for f in extract_secrets(text, "http://t/app.js", source)}
+
+
+def test_secrets_generic_api_key_name_variants():
+    for js in (
+        'cfg={"x-api-key":"AbCdEf0123456789xyz"}',
+        "const apikey = 'AbCdEf0123456789xyz'",
+        'H={"X-API-Key":`AbCdEf0123456789xyz`}',
+        "API-KEY: 'AbCdEf0123456789xyz'",
+    ):
+        assert "GENERIC_API_KEY" in _types(js), js
+
+
+def test_secrets_header_call_api_key():
+    js = 'xhr.setRequestHeader("X-API-Key", "AbCdEf0123456789xyz")'
+    assert "HEADER_API_KEY" in _types(js)
+
+
+def test_secrets_generic_api_key_widened_charset():
+    found = extract_secrets('apiKey:"abc.def/ghi+jkl=mno123"', "http://t/a.js")
+    assert any(f["type"] == "GENERIC_API_KEY" and f["value_redacted"] == "abc.…o123" for f in found)
+
+
+def test_secrets_generic_placeholders_skipped():
+    for js in (
+        'apiKey: "YOUR_API_KEY_HERE_123"',
+        'api_key="xxxxxxxxxxxxxxxxxxxx"',
+        'clientSecret: "example-client-secret-value"',
+        'apiKey: "0000000000000000"',
+    ):
+        assert not _types(js), js
+
+
+def test_secrets_generic_secret_variants():
+    assert "GENERIC_SECRET" in _types('clientSecret: "Zq81mN0pLk2Jh3Gf4"')
+    assert "GENERIC_SECRET" in _types('secret_key = "Zq81mN0pLk2Jh3Gf4"')
+
+
+def test_secrets_provider_patterns():
+    rand = "Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8Qr9St0Uv"
+    cases = {
+        "ANTHROPIC_KEY": "sk-" + "ant-api03-" + rand + rand,
+        "OPENAI_KEY": "sk-" + "proj-" + rand + rand,
+        "STRIPE_TEST_SECRET": "sk_" + "test_" + rand,
+        "STRIPE_RESTRICTED": "rk_" + "live_" + rand,
+        "SENDGRID_KEY": "SG." + "a" * 21 + "B." + "c" * 42 + "D",
+        "TWILIO_API_KEY": "SK" + "0123456789abcdef" * 2,
+        "MAILGUN_KEY": "key-" + rand[:32],
+        "GITHUB_FINE_GRAINED": "github_" + "pat_" + rand * 3,
+        "GOOGLE_OAUTH_SECRET": "GOCSPX-" + rand[:28],
+        "JWT": "eyJhbGciOiJIUzI1NiJ9." + "eyJzdWIiOiIxMjM0NTY3ODkwIn0." + "dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U",
+        "PRIVATE_KEY": "-----BEGIN RSA " + "PRIVATE KEY-----",
+    }
+    for name, value in cases.items():
+        assert name in _types(f'const v = "{value}";'), name
+    azure = "DefaultEndpointsProtocol=https;AccountName=x;AccountKey=" + "A" * 40 + "b" * 46 + "=="
+    assert "AZURE_STORAGE_KEY" in _types(azure)
+
+
+def test_secrets_anthropic_key_not_reported_as_openai():
+    key = "sk-" + "ant-api03-" + "Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8Qr9St0Uv" * 2
+    types = _types(f'k="{key}"')
+    assert "ANTHROPIC_KEY" in types and "OPENAI_KEY" not in types
+
+
+def test_secrets_openai_ignores_css_class_names():
+    # SpinKit-style class names start with sk- but aren't keys
+    assert "OPENAI_KEY" not in _types('<div class="sk-spinner-double-bounce-animation-delay">')
+
+
+def test_secrets_findings_carry_source_and_url():
+    found = extract_secrets('const API_KEY = "super_secret_16_chars_minimum"', "http://t/x/app.js", "inline")
+    assert found[0]["source"] == "inline"
+    assert found[0]["url"] == "http://t/x/app.js"
+    assert found[0]["bundle"] == "app.js"
+    assert "super_secret_16_chars_minimum" not in json.dumps(found)
+
+
+def test_merge_secrets_dedupes_on_type_and_redacted_value():
+    a = [{"type": "JWT", "value_redacted": "eyJh…R8U1", "source": "bundle"}]
+    b = [
+        {"type": "JWT", "value_redacted": "eyJh…R8U1", "source": "inline"},
+        {"type": "JWT", "value_redacted": "eyJx…zzzz", "source": "js"},
+    ]
+    merged = merge_secrets(a, b)
+    assert [m["source"] for m in merged] == ["bundle", "js"]
+
+
+def test_spa_analyzer_scans_source_map_for_secrets():
+    import asyncio
+
+    import httpx
+
+    original = 'export const cfg = { apiKey: "SrcMapOnlyKey0123456789" };'
+    files = {
+        "/assets/index-a.js": "console.log(1);\n//# sourceMappingURL=index-a.js.map",
+        "/assets/index-a.js.map": json.dumps({
+            "version": 3, "sources": ["src/config.ts"], "sourcesContent": [original], "mappings": "",
+        }),
+    }
+
+    def handler(request):
+        body = files.get(request.url.path)
+        return httpx.Response(200, text=body) if body else httpx.Response(404)
+
+    v = URLValidator("http://t.test")
+    analyzer = SPAAnalyzer({"spa": {"enabled": True}}, v, Extractor(), HTMLParser())
+    html = '<div id="root"></div><script type="module" src="/assets/index-a.js"></script>'
+
+    async def go():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
+            return await analyzer.analyze(c, html, "http://t.test", [])
+
+    result = asyncio.run(go())
+    hits = [s for s in result["secrets"] if s["type"] == "GENERIC_API_KEY"]
+    assert hits and hits[0]["source"] == "sourcemap"
+    assert hits[0]["bundle"] == "index-a.js.map"
+
+
+def test_spider_keeps_application_javascript_body_without_following_links():
+    import asyncio
+
+    import httpx
+
+    def handler(request):
+        if request.url.path == "/":
+            return httpx.Response(200, headers={"content-type": "text/html"},
+                                  text='<script src="/app.js"></script>')
+        if request.url.path == "/app.js":
+            return httpx.Response(200, headers={"content-type": "application/javascript"},
+                                  text='const t=`<a href="/from-js-template">x</a>`;')
+        return httpx.Response(200, headers={"content-type": "text/html"}, text="ok")
+
+    sp = Spider({"target": {"url": "http://t.test"}, "crawl": {"delay": 0}}, URLValidator("http://t.test"))
+
+    async def go():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
+            return await sp._fetch(c, "http://t.test/app.js")
+
+    js = asyncio.run(go())
+    assert "from-js-template" in js.body
+
+    # Full crawl: the HTML-looking link inside the JS body is not followed
+    orig_client = httpx.AsyncClient
+
+    class _Client(orig_client):
+        def __init__(self, *a, **kw):
+            kw["transport"] = httpx.MockTransport(handler)
+            kw.pop("proxy", None)
+            super().__init__(*a, **kw)
+
+    httpx.AsyncClient = _Client
+    try:
+        results = asyncio.run(sp.crawl(["http://t.test/"]))
+    finally:
+        httpx.AsyncClient = orig_client
+    assert "http://t.test/app.js" in results
+    assert not any("from-js-template" in u for u in results)
+
+
+def _crawl_result(url, body, content_type):
+    from shatterpoint.modules.spider import CrawlResult
+    return CrawlResult(url=url, status_code=200, headers={"content-type": content_type},
+                       body=body, content_type=content_type)
+
+
+def test_phase3_mines_inline_and_crawled_js_secrets_without_spa():
+    orch = CrawlOrchestrator({"target": {"url": "http://t.test"}})
+    orch.config["_no_fingerprint"] = True
+    jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"
+    orch.results["spa"] = {"secrets": [
+        {"type": "JWT", "value_redacted": jwt[:4] + "…" + jwt[-4:], "bundle": "main.js", "source": "bundle"},
+    ]}
+    orch.crawl_results = {
+        "http://t.test/": _crawl_result(
+            "http://t.test/",
+            '<html><script>window.cfg={apiKey:"InlineKey0123456789"};var t="' + jwt + '"</script></html>',
+            "text/html",
+        ),
+        "http://t.test/vendor.js": _crawl_result(
+            "http://t.test/vendor.js",
+            'h.set("x-api-key","CrawledJsKey0123456789"); // contact dev@corp.test',
+            "application/javascript",
+        ),
+    }
+    orch._phase3_extract()
+    by_type = {(s["type"], s["source"]) for s in orch.results["secrets"]}
+    assert ("GENERIC_API_KEY", "inline") in by_type
+    assert ("HEADER_API_KEY", "js") in by_type
+    # JWT from the SPA pass wins the dedupe; the inline copy is dropped
+    assert [s["source"] for s in orch.results["secrets"] if s["type"] == "JWT"] == ["bundle"]
+    # application/javascript bodies don't feed the HTML extractors
+    assert "dev@corp.test" not in orch.results["emails"]
+
+
+def test_phase3_secrets_toggle_off():
+    orch = CrawlOrchestrator({"target": {"url": "http://t.test"}, "extract": {"secrets": False}})
+    orch.config["_no_fingerprint"] = True
+    orch.crawl_results = {"http://t.test/": _crawl_result(
+        "http://t.test/", '<script>apiKey="InlineKey0123456789"</script>', "text/html")}
+    orch._phase3_extract()
+    assert orch.results["secrets"] == []
+
+
 def test_spa_enumerate_bundles_includes_modulepreload():
     html = """
     <script type="module" crossorigin src="/assets/index-a.js"></script>
@@ -3216,3 +3426,435 @@ def test_fingerprinter_version_extraction():
     apache = [d for d in detections if d["name"] == "Apache HTTP Server"]
     assert len(apache) == 1
     assert apache[0]["version"] == "2.4.41"
+
+
+# ─── Logic-flow sweep: rate limits, crawl correctness, probe noise ────
+
+import asyncio as _asyncio  # noqa: E402
+import hashlib as _hashlib  # noqa: E402
+
+import httpx as _httpx  # noqa: E402
+
+from shatterpoint.modules.framework_recon import FrameworkRecon  # noqa: E402
+from shatterpoint.modules.recon import robots_seed_paths  # noqa: E402
+from shatterpoint.modules.spider import CrawlResult  # noqa: E402
+from shatterpoint.utils.http import (  # noqa: E402
+    RetryTransport,
+    build_client,
+    parse_set_cookies,
+    retry_after_seconds,
+)
+
+
+def _run(coro):
+    return _asyncio.run(coro)
+
+
+def _patched_async_client(handler):
+    """Context manager: every httpx.AsyncClient the code builds uses `handler`."""
+    import contextlib
+
+    @contextlib.contextmanager
+    def cm():
+        orig = _httpx.AsyncClient
+
+        class _Client(orig):
+            def __init__(self, *a, **kw):
+                kw["transport"] = _httpx.MockTransport(handler)
+                kw.pop("proxy", None)
+                super().__init__(*a, **kw)
+
+        _httpx.AsyncClient = _Client
+        try:
+            yield
+        finally:
+            _httpx.AsyncClient = orig
+    return cm()
+
+
+def _retry_client(handler, **kw):
+    return _httpx.AsyncClient(transport=RetryTransport(_httpx.MockTransport(handler), **kw))
+
+
+def test_retry_transport_retries_429_then_succeeds():
+    calls = []
+
+    def handler(request):
+        calls.append(1)
+        return _httpx.Response(429 if len(calls) < 3 else 200, text="ok")
+
+    async def go():
+        async with _retry_client(handler, backoff=0) as c:
+            return await c.get("http://t.test/")
+
+    assert _run(go()).status_code == 200
+    assert len(calls) == 3
+
+
+def test_retry_transport_caps_retry_after_and_gives_up(monkeypatch):
+    waits = []
+
+    async def fake_sleep(s):
+        waits.append(s)
+
+    monkeypatch.setattr("shatterpoint.utils.http.asyncio.sleep", fake_sleep)
+
+    def handler(request):
+        return _httpx.Response(429, headers={"retry-after": "3600"})
+
+    async def go():
+        async with _retry_client(handler, retries=3, max_wait=2.5) as c:
+            return await c.get("http://t.test/")
+
+    assert _run(go()).status_code == 429
+    assert waits == [2.5, 2.5, 2.5]
+
+
+def test_retry_transport_503_only_with_retry_after_and_never_post():
+    calls = {"plain": 0, "after": 0, "post": 0}
+
+    def handler(request):
+        if request.url.path == "/plain":
+            calls["plain"] += 1
+            return _httpx.Response(503)
+        if request.method == "POST":
+            calls["post"] += 1
+            return _httpx.Response(429)
+        calls["after"] += 1
+        return _httpx.Response(503 if calls["after"] == 1 else 200, headers={"retry-after": "0"})
+
+    async def go():
+        async with _retry_client(handler, backoff=0) as c:
+            return (await c.get("http://t.test/plain"), await c.get("http://t.test/after"),
+                    await c.post("http://t.test/p"))
+
+    plain, after, post = _run(go())
+    assert (plain.status_code, calls["plain"]) == (503, 1)
+    assert (after.status_code, calls["after"]) == (200, 2)
+    assert (post.status_code, calls["post"]) == (429, 1)
+
+
+def test_retry_after_seconds_parses_seconds_and_dates():
+    from email.utils import formatdate
+    assert retry_after_seconds("7") == 7.0
+    assert retry_after_seconds(None) is None
+    assert retry_after_seconds("soon") is None
+    in_5s = retry_after_seconds(formatdate(time.time() + 5, usegmt=True))
+    assert 0 < in_5s <= 6
+
+
+def test_build_client_routes_through_proxy_inside_retry_layer():
+    import httpcore
+    for proxy, pool in (("http://127.0.0.1:8080", httpcore.AsyncHTTPProxy),
+                        ("socks5h://127.0.0.1:9050", httpcore.AsyncSOCKSProxy),
+                        (None, httpcore.AsyncConnectionPool)):
+        client = build_client(proxy=proxy)
+        assert isinstance(client._transport, RetryTransport)
+        assert type(client._transport._transport._pool) is pool
+        assert not client._mounts or all(t is None for t in client._mounts.values())
+
+
+def test_parse_set_cookies_name_value_attrs():
+    cookies = parse_set_cookies({}, ["sid=abc=def; Path=/; HttpOnly; SameSite=Lax", "=x"])
+    assert cookies == [{"name": "sid", "value": "abc=def",
+                        "attrs": {"path": "/", "httponly": "", "samesite": "Lax"}}]
+    assert parse_set_cookies({"set-cookie": "a=1; Secure"})[0]["attrs"] == {"secure": ""}
+
+
+def test_validator_normalize_empty_path_is_root():
+    v = URLValidator("http://t.test")
+    assert v.normalize("http://t.test") == v.normalize("/") == "http://t.test/"
+    assert v.normalize("http://T.test?x=1") == "http://t.test/?x=1"
+
+
+def test_spider_does_not_follow_off_scope_redirects_and_resolves_from_final_url():
+    hosts = []
+
+    def handler(request):
+        hosts.append(request.url.host)
+        path = request.url.path
+        if request.url.host != "t.test":
+            return _httpx.Response(200, headers={"content-type": "text/html"},
+                                   text='<form><input type="password"></form>me@evil.test')
+        if path == "/":
+            return _httpx.Response(200, headers={"content-type": "text/html"},
+                                   text='<a href="/go">x</a><a href="/old">y</a>')
+        if path == "/go":
+            return _httpx.Response(302, headers={"location": "http://evil.test/"})
+        if path == "/old":
+            return _httpx.Response(302, headers={"location": "/new/page"})
+        if path == "/new/page":
+            return _httpx.Response(200, headers={"content-type": "text/html"}, text='<a href="child">c</a>')
+        return _httpx.Response(200, headers={"content-type": "text/html"}, text="leaf")
+
+    sp = Spider({"target": {"url": "http://t.test"}, "crawler": {"delay": 0}}, URLValidator("http://t.test"))
+    with _patched_async_client(handler):
+        results = _run(sp.crawl(["http://t.test"]))
+    assert "evil.test" not in hosts
+    go = results["http://t.test/go"]
+    assert go.status_code == 302 and go.redirect_chain[0]["out_of_scope"] is True
+    assert results["http://t.test/old"].final_url == "http://t.test/new/page"
+    # relative "child" on the redirected page resolves against /new/page
+    assert "http://t.test/new/child" in results
+    assert "http://t.test/child" not in results
+
+
+def test_spider_does_not_mark_too_deep_links_as_queued():
+    def handler(request):
+        links = {"/": '<a href="/a">a</a>', "/a": '<a href="/x">x</a>'}
+        return _httpx.Response(200, headers={"content-type": "text/html"},
+                               text=links.get(request.url.path, "leaf"))
+
+    sp = Spider({"target": {"url": "http://t.test"}, "crawler": {"delay": 0, "max_depth": 1}},
+                URLValidator("http://t.test"))
+    with _patched_async_client(handler):
+        results = _run(sp.crawl(["http://t.test/"]))
+    assert set(results) == {"http://t.test/", "http://t.test/a"}
+    # /x was not reachable within max_depth, and must stay crawlable if a
+    # shallower page links it later
+    assert "http://t.test/x" not in sp.queued
+
+
+def test_spider_max_pages_is_exact_under_concurrency():
+    def handler(request):
+        links = "".join(f'<a href="/p{i}">p</a>' for i in range(20))
+        return _httpx.Response(200, headers={"content-type": "text/html"}, text=links)
+
+    sp = Spider({"target": {"url": "http://t.test"},
+                 "crawler": {"delay": 0, "max_pages": 4, "concurrency": 8}},
+                URLValidator("http://t.test"))
+    with _patched_async_client(handler):
+        results = _run(sp.crawl(["http://t.test/"]))
+    assert len(results) == 4 and sp.pages_crawled == 4
+
+
+def test_sitemap_index_with_failing_child_terminates():
+    calls = []
+    index = ('<?xml version="1.0"?><sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+             "<sitemap><loc>http://t.test/missing.xml</loc></sitemap>"
+             "<sitemap><loc>http://t.test/sitemap.xml</loc></sitemap>"
+             "<sitemap><loc>http://other.test/s.xml</loc></sitemap>"
+             "<sitemap><loc>http://t.test/pages.xml</loc></sitemap></sitemapindex>")
+    pages = ('<?xml version="1.0"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+             "<url><loc>http://t.test/about</loc></url></urlset>")
+
+    def handler(request):
+        calls.append(str(request.url))
+        body = {"/sitemap.xml": index, "/pages.xml": pages}.get(request.url.path)
+        if body:
+            return _httpx.Response(200, headers={"content-type": "application/xml"}, text=body)
+        return _httpx.Response(404)
+
+    recon = ReconModule({}, "http://t.test")
+
+    async def go():
+        async with _httpx.AsyncClient(transport=_httpx.MockTransport(handler)) as c:
+            return await recon.parse_sitemap(c)
+
+    result = _run(go())
+    assert result["found"] and result["urls"] == ["http://t.test/about"]
+    assert not any("other.test" in u for u in calls)
+    assert calls.count("http://t.test/sitemap.xml") == 1
+
+
+def test_sitemap_listed_in_robots_is_used():
+    urlset = ('<?xml version="1.0"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+              "<url><loc>http://t.test/listed</loc></url></urlset>")
+
+    def handler(request):
+        if request.url.path == "/robots.txt":
+            return _httpx.Response(200, headers={"content-type": "text/plain"},
+                                   text="Sitemap: /custom-map.xml\n")
+        if request.url.path == "/custom-map.xml":
+            return _httpx.Response(200, headers={"content-type": "application/xml"}, text=urlset)
+        return _httpx.Response(404)
+
+    recon = ReconModule({"recon": {"common_paths": False, "security_txt": False}}, "http://t.test")
+
+    async def go():
+        async with _httpx.AsyncClient(transport=_httpx.MockTransport(handler)) as c:
+            return await recon.run_all(c)
+
+    assert _run(go())["sitemap"]["urls"] == ["http://t.test/listed"]
+
+
+def test_robots_seed_paths_strip_patterns():
+    assert robots_seed_paths(["/admin/*.php$", "private", "/x/", "/x/", "", "*", "/*"]) == [
+        "/admin/", "/private", "/x/", "/",
+    ]
+
+
+def _baseline_for(status, body):
+    return Baseline(available=True, status_code=status,
+                    body_hash=_hashlib.sha256(body.encode()).hexdigest(), body_length=len(body))
+
+
+def test_baseline_is_noise_covers_401_403_walls_and_redirects():
+    wall = _baseline_for(403, "<h1>Forbidden by WAF</h1>")
+    assert wall.is_noise(403, "<h1>Forbidden by WAF</h1>")
+    assert not wall.is_noise(403, "<h1>Admin area: staff only, contact IT for access</h1>")
+    assert not wall.is_noise(401, "<h1>Forbidden by WAF</h1>")
+    soft404 = _baseline_for(200, "app shell")
+    assert soft404.is_noise(200, "app shell") and not soft404.is_noise(403, "app shell")
+    login = Baseline(available=True, status_code=200, body_hash="", body_length=0, redirect_location="/login")
+    assert login.is_noise(303, "", "http://t.test/login")
+    assert not login.is_noise(302, "", "/dashboard")
+
+
+def _wall_handler(request):
+    return _httpx.Response(403, text="<h1>Forbidden by WAF</h1>")
+
+
+def test_probers_drop_catch_all_403_wall():
+    recon = ReconModule({}, "http://t.test")
+    fp = Fingerprinter({"fingerprint": {}})
+    fr = FrameworkRecon({"framework_recon": {"enabled": True}}, URLValidator("http://t.test"))
+
+    async def go():
+        async with _httpx.AsyncClient(transport=_httpx.MockTransport(_wall_handler)) as c:
+            return (
+                await recon.probe_common_paths(c),
+                await fp.probe_known_paths(c, "http://t.test"),
+                await fr.analyze(c, "http://t.test", [{"id": "laravel"}]),
+            )
+
+    common, techs, framework = _run(go())
+    assert common == [] and techs == [] and framework["probes"] == []
+
+
+def test_common_paths_reports_303():
+    def handler(request):
+        if request.url.path == "/admin":
+            return _httpx.Response(303, headers={"location": "/admin/login"})
+        return _httpx.Response(404, text="nope")
+
+    recon = ReconModule({}, "http://t.test")
+
+    async def go():
+        async with _httpx.AsyncClient(transport=_httpx.MockTransport(handler)) as c:
+            return await recon.probe_common_paths(c)
+
+    found = _run(go())
+    assert [(f["path"], f["status_code"]) for f in found] == [("/admin", 303)]
+
+
+def test_framework_recon_fetch_errors_are_not_findings():
+    def handler(request):
+        if request.url.path.startswith("/__shatterpoint_baseline_"):
+            return _httpx.Response(404, text="nope")
+        raise _httpx.ReadTimeout("slow", request=request)
+
+    fr = FrameworkRecon({"framework_recon": {"enabled": True}}, URLValidator("http://t.test"))
+
+    async def go():
+        async with _httpx.AsyncClient(transport=_httpx.MockTransport(handler)) as c:
+            return await fr.analyze(c, "http://t.test", [{"id": "laravel"}])
+
+    result = _run(go())
+    assert result["probes"] == []
+    assert result["summary"] == {"critical": 0, "high": 0, "medium": 0, "info": 0}
+    assert result["fetch_errors"] and result["fetch_errors"][0]["error"] == "timeout"
+
+
+def test_session_cookie_judged_on_name_and_parsed_flags():
+    recon = ReconModule({}, "http://t.test")
+    auth = recon.detect_auth_mechanisms(
+        "http://t.test/", {}, "", [],
+        set_cookies=["theme=dark; Path=/authors", "insecure_pref=1; HttpOnly", "sessionid=x; Secure"],
+    )
+    details = [a["detail"] for a in auth if a["type"] == "Session Cookie"]
+    assert details == ["Cookie: sessionid | Flags: Secure"]
+
+
+def test_source_map_fallback_keeps_query_after_map():
+    assert extract_source_map_url("x()", "http://t/app.js?v=3") == "http://t/app.js.map?v=3"
+    assert extract_source_map_url("x()", "http://t/app.js") == "http://t/app.js.map"
+
+
+def test_parameterised_spa_routes_are_not_seeded():
+    orch = CrawlOrchestrator({"target": {"url": "http://t.test"}})
+
+    async def fake_analyze(*a, **kw):
+        return {"routes": [{"path": "/users/:id"}, {"path": "/posts/[slug]"},
+                           {"path": "/docs/*"}, {"path": "/settings"}]}
+
+    orch.spa_analyzer.analyze = fake_analyze
+    _run(orch._phase18_spa(None))
+    assert orch.seed_urls == ["http://t.test", "http://t.test/settings"]
+
+
+def test_seed_dedupe_keeps_order():
+    orch = CrawlOrchestrator({"target": {"url": "http://t.test"}})
+    orch.seed_urls = ["http://t.test", "http://t.test/z", "http://t.test/a", "http://t.test/z"]
+    seen = []
+
+    async def fake_crawl(seeds):
+        seen.extend(seeds)
+        return {}
+
+    orch.spider.crawl = fake_crawl
+    _run(orch._phase2_crawl())
+    assert seen == ["http://t.test", "http://t.test/z", "http://t.test/a"]
+
+
+def test_landing_429_is_not_used_as_landing_html():
+    orch = CrawlOrchestrator({"target": {"url": "http://t.test"}})
+
+    def handler(request):
+        return _httpx.Response(429, headers={"content-type": "text/html"},
+                               text='<div id="app"></div>')
+
+    async def go():
+        async with _httpx.AsyncClient(transport=_httpx.MockTransport(handler)) as c:
+            await orch._phase16_body(c)
+
+    _run(go())
+    assert orch.landing_html == ""
+
+
+def _page(url, body="", status=200, content_type="text/html", headers=None, set_cookies=None):
+    h = {"content-type": content_type, **(headers or {})}
+    return CrawlResult(url=url, status_code=status, headers=h, body=body,
+                       content_type=content_type, set_cookies=set_cookies or [])
+
+
+def test_phase3_header_evidence_on_empty_bodies_and_429_skipped():
+    orch = CrawlOrchestrator({"target": {"url": "http://t.test"}})
+    orch.crawl_results = {
+        "http://t.test/backup.sql": _page("http://t.test/backup.sql", content_type="application/octet-stream"),
+        "http://t.test/admin": _page("http://t.test/admin", status=401,
+                                     headers={"www-authenticate": 'Basic realm="ops"'}),
+        "http://t.test/busy": _page("http://t.test/busy", status=429,
+                                    body='<form><input type="password"></form>x@y.test'),
+    }
+    orch._phase3_extract()
+    assert [f["url"] for f in orch.results["interesting_files"]] == ["http://t.test/backup.sql"]
+    assert any(a["type"] == "HTTP Basic Auth" for a in orch.results["auth_mechanisms"])
+    assert orch.results["forms"] == [] and orch.results["emails"] == []
+
+
+def test_phase3_output_independent_of_crawl_completion_order():
+    pages = [
+        _page(f"http://t.test/p{i}", body=f'<!-- TODO note {i} for the team --><form action="/f{i}">'
+                                         f'<input name="q{i}"></form>')
+        for i in range(5)
+    ]
+
+    def run(order):
+        orch = CrawlOrchestrator({"target": {"url": "http://t.test"}})
+        orch.crawl_results = {p.url: p for p in order}
+        orch._phase3_extract()
+        return json.dumps({k: orch.results[k] for k in ("forms", "comments", "all_urls")})
+
+    assert run(pages) == run(list(reversed(pages)))
+
+
+def test_html_parser_accepts_pre_parsed_document():
+    html = ('<form action="/l"><input type="password" name="p"></form>'
+            '<!-- secret admin note here --><script>var a = "/api/x";</script>')
+    hp = HTMLParser()
+    doc = hp.parse(html)
+    assert hp.extract_forms(doc, "u") == hp.extract_forms(html, "u")
+    assert hp.extract_comments(doc, "u") == hp.extract_comments(html, "u")
+    assert hp.extract_scripts(doc) == hp.extract_scripts(html)
+    assert hp.extract_links(doc) == hp.extract_links(html)

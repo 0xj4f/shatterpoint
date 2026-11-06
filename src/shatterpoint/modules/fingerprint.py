@@ -5,6 +5,7 @@ by analyzing HTTP headers, cookies, HTML content, and known paths.
 """
 
 import re
+from functools import lru_cache
 from pathlib import Path
 
 import httpx
@@ -12,6 +13,26 @@ import yaml
 
 from shatterpoint.utils.baseline import Baseline, fetch_baseline
 from shatterpoint.utils.formatter import print_finding, print_status
+from shatterpoint.utils.http import parse_set_cookies
+
+CONFIDENCE_RANK = {"high": 3, "medium": 2, "low": 1, "?": 0, None: 0, "": 0}
+
+
+# Signature regexes are built from YAML strings and run for every signature
+# on every crawled page; compile each one once.
+@lru_cache(maxsize=None)
+def _meta_regex(meta_name: str) -> re.Pattern:
+    """<meta name="..." content="..."> for one meta name."""
+    return re.compile(
+        rf'<meta\s+[^>]*name=["\']?{re.escape(meta_name)}["\']?\s+[^>]*content=["\']?([^"\'>\s]+)',
+        re.IGNORECASE,
+    )
+
+
+@lru_cache(maxsize=None)
+def _body_regex(body_pattern: str) -> re.Pattern:
+    """Word-boundary-style literal match (see _check_signature)."""
+    return re.compile(rf"(?<!\w){re.escape(body_pattern)}(?!\w)", re.IGNORECASE)
 
 
 def resolve_conflicts(techs: list[dict], signatures: dict) -> list[dict]:
@@ -34,7 +55,6 @@ def resolve_conflicts(techs: list[dict], signatures: dict) -> list[dict]:
     if not techs or not signatures:
         return list(techs)
 
-    confidence_rank = {"high": 3, "medium": 2, "low": 1, "?": 0, None: 0, "": 0}
 
     def strength(t: dict) -> tuple[int, int, int]:
         matched = t.get("matched_on") or []
@@ -42,7 +62,7 @@ def resolve_conflicts(techs: list[dict], signatures: dict) -> list[dict]:
         return (
             len(methods),
             len(matched),
-            confidence_rank.get(t.get("confidence"), 0),
+            CONFIDENCE_RANK.get(t.get("confidence"), 0),
         )
 
     # Build id → tech mapping (assumes dedup_technologies already ran)
@@ -79,7 +99,6 @@ def dedup_technologies(techs: list[dict]) -> list[dict]:
     `matched_on`, prefer the more specific `version`, and pick the
     highest confidence seen across duplicates.
     """
-    confidence_rank = {"high": 3, "medium": 2, "low": 1, "?": 0, None: 0, "": 0}
     by_id: dict[str, dict] = {}
     order: list[str] = []
     for tech in techs:
@@ -111,7 +130,7 @@ def dedup_technologies(techs: list[dict]) -> list[dict]:
             existing["version"] = tech["version"]
         # Promote confidence to the highest seen
         new_conf = tech.get("confidence")
-        if confidence_rank.get(new_conf, 0) > confidence_rank.get(existing.get("confidence"), 0):
+        if CONFIDENCE_RANK.get(new_conf, 0) > CONFIDENCE_RANK.get(existing.get("confidence"), 0):
             existing["confidence"] = new_conf
     return [by_id[tid] for tid in order]
 
@@ -306,93 +325,35 @@ class Fingerprinter:
 
         baseline_drops = 0
         for tech_id, sig in self.signatures.items():
-            paths = sig.get("paths", [])
-            for path in paths:
-                if path in probed_paths:
-                    continue
-                probed_paths.add(path)
-
-                url = f"{base_url.rstrip('/')}{path}"
-                try:
-                    response = await client.get(
-                        url,
-                        follow_redirects=True,
-                        timeout=httpx.Timeout(5),
-                    )
-
-                    if response.status_code == 200:
-                        body = response.text or ""
-                        if baseline.matches(response.status_code, body):
-                            baseline_drops += 1
-                            continue
-                        detections.append({
-                            "id": tech_id,
-                            "name": sig.get("name", tech_id),
-                            "category": sig.get("category", "Unknown"),
-                            "version": None,
-                            # A single path hit is weak evidence — explicit
-                            # low (was None → rendered as a confusing [null]).
-                            "confidence": "low",
-                            "matched_on": [{
-                                "method": "path_probe",
-                                "detail": f"{path} returned 200",
-                            }],
-                        })
-                        print_finding("Fingerprint", f"Found {sig.get('name', tech_id)} via {path}")
-
-                    elif response.status_code in (401, 403):
-                        # Protected but exists
-                        detections.append({
-                            "id": tech_id,
-                            "name": sig.get("name", tech_id),
-                            "category": sig.get("category", "Unknown"),
-                            "version": None,
-                            "confidence": "low",
-                            "matched_on": [{
-                                "method": "path_probe",
-                                "detail": f"{path} returned {response.status_code} (exists but protected)",
-                            }],
-                        })
-
-                except Exception:
-                    pass
-
-            # paths_200: "exploit file reachable" checks that only count as a
-            # finding when the file is actually REACHABLE (200). A 403/404 means
-            # blocked or absent — NOT vulnerable — so it must not produce a lead
-            # (e.g. Drupal ships phpunit in /vendor but .htaccess 403s
+            # paths: a 200 or a 401/403 (exists but protected) is evidence.
+            # paths_200: "exploit file reachable" checks that only count when
+            # the file is actually REACHABLE (200). A 403/404 means blocked or
+            # absent — NOT vulnerable — so it must not produce a lead (e.g.
+            # Drupal ships phpunit in /vendor but .htaccess 403s
             # eval-stdin.php, which would be a false CVE-2017-9841 signal).
-            for path in sig.get("paths_200", []):
+            checks = [(p, False) for p in sig.get("paths", [])]
+            checks += [(p, True) for p in sig.get("paths_200", [])]
+            for path, require_200 in checks:
                 if path in probed_paths:
                     continue
                 probed_paths.add(path)
-                url = f"{base_url.rstrip('/')}{path}"
-                try:
-                    response = await client.get(
-                        url, follow_redirects=True, timeout=httpx.Timeout(5),
-                    )
-                    if response.status_code == 200:
-                        body = response.text or ""
-                        if baseline.matches(response.status_code, body):
-                            baseline_drops += 1
-                            continue
-                        detections.append({
-                            "id": tech_id,
-                            "name": sig.get("name", tech_id),
-                            "category": sig.get("category", "Unknown"),
-                            "version": None,
-                            "confidence": "low",
-                            "matched_on": [{
-                                "method": "path_probe",
-                                "detail": f"{path} reachable (200) — exploit file exposed",
-                            }],
-                        })
-                        print_finding(
-                            "Fingerprint",
-                            f"Found {sig.get('name', tech_id)} via reachable {path}",
-                        )
-                except Exception:
-                    pass
+                outcome = await self._probe_path(client, base_url, path, baseline, require_200)
+                if outcome == "noise":
+                    baseline_drops += 1
+                elif outcome:
+                    detections.append({
+                        "id": tech_id,
+                        "name": sig.get("name", tech_id),
+                        "category": sig.get("category", "Unknown"),
+                        "version": None,
+                        # A single path hit is weak evidence — explicit
+                        # low (was None → rendered as a confusing [null]).
+                        "confidence": "low",
+                        "matched_on": [{"method": "path_probe", "detail": outcome}],
+                    })
+                    if not outcome.endswith("(exists but protected)"):
+                        how = "reachable " if require_200 else ""
+                        print_finding("Fingerprint", f"Found {sig.get('name', tech_id)} via {how}{path}")
 
         if baseline_drops:
             print_status(f"Dropped {baseline_drops} fingerprint probe(s) matching the 404 baseline")
@@ -413,6 +374,31 @@ class Fingerprinter:
             return []
 
         return detections
+
+    async def _probe_path(
+        self,
+        client: httpx.AsyncClient,
+        base_url: str,
+        path: str,
+        baseline: Baseline,
+        require_200: bool,
+    ) -> str | None:
+        """GET one tech-specific path. Returns the evidence detail string,
+        "noise" when the response is the target's catch-all answer, or None
+        when the path gives no signal (absent, error, wrong status)."""
+        url = f"{base_url.rstrip('/')}{path}"
+        try:
+            response = await client.get(url, follow_redirects=True, timeout=httpx.Timeout(5))
+        except Exception:
+            return None
+        status = response.status_code
+        if status not in (200, 401, 403) or (require_200 and status != 200):
+            return None
+        if baseline.is_noise(status, response.text or ""):
+            return "noise"
+        if status == 200:
+            return f"{path} reachable (200) — exploit file exposed" if require_200 else f"{path} returned 200"
+        return f"{path} returned {status} (exists but protected)"
 
     def _check_signature(
         self,
@@ -482,11 +468,7 @@ class Fingerprinter:
                 meta_name = meta_check.get("name", "")
                 pattern = meta_check.get("pattern", "")
                 # Look for <meta name="..." content="...">
-                meta_regex = re.compile(
-                    rf'<meta\s+[^>]*name=["\']?{re.escape(meta_name)}["\']?\s+[^>]*content=["\']?([^"\'>\s]+)',
-                    re.IGNORECASE,
-                )
-                match = meta_regex.search(body)
+                match = _meta_regex(meta_name).search(body)
                 if match:
                     content = match.group(1)
                     if pattern:
@@ -513,11 +495,7 @@ class Fingerprinter:
             for body_pattern in sig.get("body", []):
                 if not body_pattern:
                     continue
-                body_re = re.compile(
-                    rf"(?<!\w){re.escape(body_pattern)}(?!\w)",
-                    re.IGNORECASE,
-                )
-                if body_re.search(body):
+                if _body_regex(body_pattern).search(body):
                     matched_on.append({
                         "method": "body",
                         "detail": f"Body contains: {body_pattern}",
@@ -559,19 +537,4 @@ class Fingerprinter:
         the only way to see all cookies when the server sent more than
         one (httpx Headers cast to dict() collapses duplicates).
         """
-        cookies = {}
-        if set_cookies:
-            cookie_values = list(set_cookies)
-        else:
-            cookie_values = [
-                v for k, v in headers.items() if k.lower() == "set-cookie"
-            ]
-        for value in cookie_values:
-            parts = value.split(";")
-            if parts:
-                name_val = parts[0].split("=", 1)
-                if name_val:
-                    cookies[name_val[0].strip()] = (
-                        name_val[1].strip() if len(name_val) > 1 else ""
-                    )
-        return cookies
+        return {c["name"]: c["value"] for c in parse_set_cookies(headers, set_cookies)}

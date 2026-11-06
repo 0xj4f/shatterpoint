@@ -79,7 +79,10 @@ flowchart LR
     spider --> auth
     spider --> validator["utils/validator.py<br/>scope/normalize"]
     spider --> parser
-    recon --> baseline["utils/baseline.py<br/>404 + redirect baseline"]
+    recon --> baseline["utils/baseline.py<br/>404 / redirect / 401-403 wall baseline"]
+    crawler --> http["utils/http.py<br/>429-retrying client · Set-Cookie parsing"]
+    spider --> http
+    recon --> http
     fingerprint --> baseline
     framework --> baseline
     spa --> extractor
@@ -135,6 +138,8 @@ Every top-level key in the saved JSON, and the phase that fills it:
 |---|---|---|
 | **404 content baseline** | catch-all routers (SPA dev servers) that 200 every path → phantom path hits | `utils/baseline.py` |
 | **Redirect baseline** | apps that 302 every path to a login (GitLab) → flood of false probe "findings" | `Baseline.is_catchall_redirect` |
+| **401/403 wall baseline** | a WAF / auth wall answering every path with the same 401/403 → "exists but protected" for every probe | `Baseline.is_noise` (shared by all three path probers) |
+| **Rate-limit retry** | a `429` error page used as the landing HTML, a probe result or a crawled page | `utils/http.py` `RetryTransport` |
 | **Content-confirm gate** | a bare 200 at `/console` / `/admin/` masquerading as the real product | `framework_recon` `confirm_any` |
 | **Conflict resolution** | two incompatible techs both firing (Laravel vs Rails on shared `<meta csrf-token>`) | `fingerprint.resolve_conflicts` |
 | **Product-specific signatures** | generic paths/headers (`/admin/`, `x-powered-by: PHP`) cross-tagging frameworks | `signatures/fingerprints.yaml` |

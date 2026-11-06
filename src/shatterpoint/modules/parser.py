@@ -40,8 +40,24 @@ def _make_soup(markup: str) -> BeautifulSoup:
     return BeautifulSoup(markup, "xml" if looks_xml else "lxml")
 
 
+def _as_soup(markup: str | BeautifulSoup) -> BeautifulSoup:
+    """Accept raw markup or an already-parsed document (see HTMLParser.parse)."""
+    return markup if isinstance(markup, BeautifulSoup) else _make_soup(markup)
+
+
 class HTMLParser:
-    """Parses HTML content and extracts recon-relevant data."""
+    """Parses HTML content and extracts recon-relevant data.
+
+    Every `extract_*` method that walks the DOM takes either the raw HTML
+    string or the document returned by :meth:`parse`. Callers that run
+    several extractors on one page parse it once and pass the result —
+    BeautifulSoup parsing is the dominant per-page cost.
+    """
+
+    @staticmethod
+    def parse(html: str) -> BeautifulSoup:
+        """Parse a page once for reuse across extractors."""
+        return _make_soup(html)
 
     # Regex patterns
     EMAIL_PATTERN = re.compile(
@@ -53,11 +69,11 @@ class HTMLParser:
         re.IGNORECASE,
     )
 
-    def extract_links(self, html: str, base_url: str = "") -> list[str]:
+    def extract_links(self, html: str | BeautifulSoup, base_url: str = "") -> list[str]:
         """Extract all href and src links from HTML."""
         links = set()
         try:
-            soup = _make_soup(html)
+            soup = _as_soup(html)
 
             # <a href="...">
             for tag in soup.find_all("a", href=True):
@@ -96,14 +112,14 @@ class HTMLParser:
 
         return list(links)
 
-    def extract_forms(self, html: str, page_url: str) -> list[dict]:
+    def extract_forms(self, html: str | BeautifulSoup, page_url: str) -> list[dict]:
         """
         Extract all forms with their inputs, methods, and actions.
         This is critical for OSCP - forms are primary attack vectors.
         """
         forms = []
         try:
-            soup = _make_soup(html)
+            soup = _as_soup(html)
 
             for form in soup.find_all("form"):
                 form_data = {
@@ -159,7 +175,7 @@ class HTMLParser:
 
         return forms
 
-    def extract_comments(self, html: str, page_url: str) -> list[dict]:
+    def extract_comments(self, html: str | BeautifulSoup, page_url: str) -> list[dict]:
         """
         Extract HTML comments - often contain sensitive info:
         - TODO notes with credentials
@@ -169,7 +185,7 @@ class HTMLParser:
         """
         comments = []
         try:
-            soup = _make_soup(html)
+            soup = _as_soup(html)
 
             for comment in soup.find_all(string=lambda text: isinstance(text, Comment)):
                 text = comment.strip()
@@ -205,11 +221,11 @@ class HTMLParser:
         """Extract email addresses from HTML content."""
         return list(set(self.EMAIL_PATTERN.findall(html)))
 
-    def extract_meta_tags(self, html: str) -> list[dict]:
+    def extract_meta_tags(self, html: str | BeautifulSoup) -> list[dict]:
         """Extract meta tags - useful for fingerprinting and info gathering."""
         meta_tags = []
         try:
-            soup = _make_soup(html)
+            soup = _as_soup(html)
             for meta in soup.find_all("meta"):
                 tag_data = {}
                 for attr in ["name", "property", "http-equiv", "content", "charset"]:
@@ -222,7 +238,7 @@ class HTMLParser:
             pass
         return meta_tags
 
-    def extract_scripts(self, html: str) -> dict:
+    def extract_scripts(self, html: str | BeautifulSoup) -> dict:
         """
         Extract script information:
         - External script sources
@@ -230,7 +246,7 @@ class HTMLParser:
         """
         scripts = {"external": [], "inline": []}
         try:
-            soup = _make_soup(html)
+            soup = _as_soup(html)
             for script in soup.find_all("script"):
                 if script.get("src"):
                     scripts["external"].append({
@@ -247,11 +263,11 @@ class HTMLParser:
             pass
         return scripts
 
-    def extract_headers_from_html(self, html: str) -> list[dict]:
+    def extract_headers_from_html(self, html: str | BeautifulSoup) -> list[dict]:
         """Extract page title and heading hierarchy (useful for mapping)."""
         headings = []
         try:
-            soup = _make_soup(html)
+            soup = _as_soup(html)
 
             title = soup.find("title")
             if title and title.string:

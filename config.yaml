@@ -26,6 +26,7 @@ extract:
   comments: true                      # HTML/JS comments
   emails: true
   js_endpoints: true                  # Extract URLs from JavaScript
+  secrets: true                       # Baked secrets in inline + crawled JS (no --spa needed)
   metadata: true                      # Meta tags, headers
 
 # Fingerprinting
