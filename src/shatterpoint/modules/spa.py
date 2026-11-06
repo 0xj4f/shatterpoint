@@ -120,11 +120,48 @@ _SECRET_PATTERNS = [
     ("STRIPE_LIVE_PUB", re.compile(r'\b(pk_live_[0-9a-zA-Z]{24,})\b')),
     ("SLACK_TOKEN", re.compile(r'\b(xox[baprs]-[0-9A-Za-z\-]{10,})\b')),
     ("GITHUB_TOKEN", re.compile(r'\b(gh[pousr]_[0-9A-Za-z]{36,})\b')),
+    ("GITHUB_FINE_GRAINED", re.compile(r'\b(github_pat_[0-9A-Za-z_]{60,})\b')),
     ("FIREBASE_CONFIG_APIKEY", re.compile(r'apiKey\s*:\s*["\'`](AIza[0-9A-Za-z_\-]{35})["\'`]')),
-    ("GENERIC_API_KEY", re.compile(r'(?:API_KEY|api_key|apiKey)\s*[:=]\s*["\'`]([A-Za-z0-9_\-]{16,})["\'`]')),
-    ("GENERIC_SECRET", re.compile(r'(?:SECRET|secret)\s*[:=]\s*["\'`]([A-Za-z0-9_\-]{16,})["\'`]')),
+    ("STRIPE_TEST_SECRET", re.compile(r'\b(sk_test_[0-9a-zA-Z]{24,})\b')),
+    ("STRIPE_RESTRICTED", re.compile(r'\b(rk_live_[0-9a-zA-Z]{24,})\b')),
+    ("ANTHROPIC_KEY", re.compile(r'\b(sk-ant-[0-9A-Za-z_\-]{32,})')),
+    # Project/service keys are long and hyphenated; legacy keys are 48
+    # alphanumerics. A bare `sk-<words>` would hit CSS classes (SpinKit's
+    # sk-spinner-…), so neither shape is loosened.
+    ("OPENAI_KEY", re.compile(r'\b(sk-(?:(?:proj|svcacct|admin)-[0-9A-Za-z_\-]{40,}|[0-9A-Za-z]{48}))(?![0-9A-Za-z])')),
+    ("SENDGRID_KEY", re.compile(r'\b(SG\.[0-9A-Za-z_\-]{22}\.[0-9A-Za-z_\-]{43})\b')),
+    ("TWILIO_API_KEY", re.compile(r'\b(SK[0-9a-f]{32})\b')),
+    ("MAILGUN_KEY", re.compile(r'\b(key-[0-9a-zA-Z]{32})\b')),
+    ("GOOGLE_OAUTH_SECRET", re.compile(r'\b(GOCSPX-[0-9A-Za-z_\-]{28})')),
+    ("AZURE_STORAGE_KEY", re.compile(r'AccountKey=([A-Za-z0-9+/]{86}==)')),
+    ("PRIVATE_KEY", re.compile(r'(-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY-----)')),
+    ("JWT", re.compile(r'\b(eyJ[0-9A-Za-z_\-]{10,}\.eyJ[0-9A-Za-z_\-]{10,}\.[0-9A-Za-z_\-]{10,})')),
+    # Generic assignments. Key names are matched case-insensitively and may be
+    # quoted (object keys / header names): apiKey, api_key, API-KEY, apikey,
+    # "X-API-Key": … Values allow . / + = so base64-ish keys aren't dropped.
+    ("GENERIC_API_KEY", re.compile(
+        r'(?<![A-Za-z0-9])["\'`]?(?:x[-_]?)?api[-_]?key["\'`]?\s*[:=]\s*["\'`]([A-Za-z0-9_\-./+=]{16,})["\'`]',
+        re.IGNORECASE), "placeholder_filter"),
+    # Header set via a call: headers.set("X-API-Key", "…") / setRequestHeader(…)
+    ("HEADER_API_KEY", re.compile(
+        r'["\'`](?:x-)?api-?key["\'`]\s*,\s*["\'`]([A-Za-z0-9_\-./+=]{16,})["\'`]',
+        re.IGNORECASE), "placeholder_filter"),
+    ("GENERIC_SECRET", re.compile(
+        r'(?:SECRET|secret|(?<![A-Za-z0-9])(?i:client[-_]?secret|secret[-_]?key))["\'`]?\s*[:=]\s*["\'`]([A-Za-z0-9_\-./+=]{16,})["\'`]'),
+        "placeholder_filter"),
     ("GENERIC_TOKEN_ASSIGN", re.compile(r'(?:TOKEN|token)\s*[:=]\s*["\'`]([A-Za-z0-9_\-\.]{20,})["\'`]')),
 ]
+
+# Values that are obviously docs/sample placeholders, not real keys. Only
+# applied to the generic patterns — provider prefixes are specific enough.
+_PLACEHOLDER_HINTS = ("your", "example", "xxxx", "placeholder", "changeme", "dummy", "sample", "insert", "replace")
+
+
+def _looks_like_placeholder(value: str) -> bool:
+    low = value.lower()
+    if any(hint in low for hint in _PLACEHOLDER_HINTS):
+        return True
+    return len(set(low)) <= 2
 
 
 # sourceMappingURL comment: //# sourceMappingURL=foo.js.map
@@ -255,8 +292,10 @@ def extract_source_map_url(bundle_text: str, bundle_url: str) -> str | None:
         if sm_ref.startswith("data:"):
             return None  # inline data URI — skip, not fetchable
         return urljoin(bundle_url, sm_ref)
-    # Conventional sibling
-    return bundle_url + ".map"
+    # Conventional sibling: <bundle path>.map, keeping any query string
+    # (`app.js?v=3` → `app.js.map?v=3`, not `app.js?v=3.map`).
+    path, sep, query = bundle_url.partition("?")
+    return f"{path}.map{sep}{query}"
 
 
 def parse_source_map(sm_text: str, preview_chars: int = 200) -> dict | None:
@@ -353,17 +392,20 @@ def extract_chunks(bundle_text: str) -> list[str]:
     return sorted(results)
 
 
-def extract_secrets(text: str, bundle_url: str) -> list[dict]:
-    """Run curated secret patterns over bundle text.
+def extract_secrets(text: str, bundle_url: str, source: str = "bundle") -> list[dict]:
+    """Run curated secret patterns over JS text.
 
-    Returns [{type, value_redacted, bundle}]. Raw values never leave this
-    function — only the first4…last4 form is surfaced.
+    `source` says where the text came from: bundle | sourcemap | inline | js.
+    Returns [{type, value_redacted, bundle, url, source}]; `bundle` is the
+    last path segment of `bundle_url` (kept for report compatibility), `url`
+    the full location. Raw values never leave this function — only the
+    first4…last4 form is surfaced.
     """
     if not text:
         return []
     findings: list[dict] = []
     seen: set[tuple[str, str]] = set()
-    bundle_name = bundle_url.rsplit("/", 1)[-1]
+    bundle_name = bundle_url.rsplit("/", 1)[-1] or bundle_url
     for entry in _SECRET_PATTERNS:
         # Support (name, pattern) and (name, pattern, filter) shapes
         if len(entry) == 2:
@@ -383,6 +425,8 @@ def extract_secrets(text: str, bundle_url: str) -> list[dict]:
                 ctx = text[ctx_start:match.start()].lower()
                 if "aws" not in ctx and "secret" not in ctx:
                     continue
+            elif extra_filter == "placeholder_filter" and _looks_like_placeholder(value):
+                continue
             key = (name, value)
             if key in seen:
                 continue
@@ -391,8 +435,28 @@ def extract_secrets(text: str, bundle_url: str) -> list[dict]:
                 "type": name,
                 "value_redacted": redact_token(value),
                 "bundle": bundle_name,
+                "url": bundle_url,
+                "source": source,
             })
     return findings
+
+
+def merge_secrets(*groups: list[dict]) -> list[dict]:
+    """Concatenate secret findings, keeping the first location per secret.
+
+    Dedup is on (type, value_redacted) — raw values are never retained, and
+    a first4…last4 collision within one type is vanishingly unlikely.
+    """
+    merged: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for group in groups:
+        for finding in group or []:
+            key = (finding.get("type", ""), finding.get("value_redacted", ""))
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(finding)
+    return merged
 
 
 def extract_state_dumps(html: str, preview_chars: int = 500) -> dict:
@@ -612,6 +676,12 @@ class SPAAnalyzer:
                             full_source = parsed["app_source"]
                             if full_source:
                                 combined_text_for_routes.append(full_source)
+                                # Original source often keeps keys the
+                                # minifier inlined or split in the bundle.
+                                if self.extract_secrets_enabled:
+                                    result["secrets"].extend(
+                                        extract_secrets(full_source, sm_url, source="sourcemap")
+                                    )
                                 for ep in self.extractor.extract_js_endpoints(full_source, sm_url):
                                     if ep["url"] in seen_endpoints:
                                         continue

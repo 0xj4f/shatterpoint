@@ -10,6 +10,7 @@ Usage:
 import argparse
 import asyncio
 import importlib.util
+import re
 import sys
 import time
 import warnings
@@ -28,9 +29,13 @@ from shatterpoint.modules.fingerprint import (
 )
 from shatterpoint.modules.framework_recon import FrameworkRecon
 from shatterpoint.modules.parser import HTMLParser
-from shatterpoint.modules.recon import ReconModule
-from shatterpoint.modules.spa import SPAAnalyzer
-from shatterpoint.modules.spider import Spider
+from shatterpoint.modules.recon import ReconModule, robots_seed_paths
+from shatterpoint.modules.spa import SPAAnalyzer, extract_secrets, merge_secrets
+from shatterpoint.modules.spider import (
+    Spider,
+    is_js_content_type,
+    is_non_text_js_content_type,
+)
 from shatterpoint.utils.auth import (
     ENV_VAR,
     build_auth_headers,
@@ -52,6 +57,7 @@ from shatterpoint.utils.formatter import (
     print_summary,
     save_report,
 )
+from shatterpoint.utils.http import build_client
 from shatterpoint.utils.proxy import resolve_proxy
 from shatterpoint.utils.stacktrace import merge_findings, mine_response
 from shatterpoint.utils.validator import URLValidator
@@ -237,6 +243,22 @@ Environment:
     return parser.parse_args()
 
 
+# Route segments that are placeholders, not pages: :id, [slug], *
+_PARAM_ROUTE = re.compile(r"/:|\[|\*")
+
+
+def _dedupe(items: list[dict], key) -> list[dict]:
+    """Keep the first item per key(item), preserving order."""
+    seen: set = set()
+    unique: list[dict] = []
+    for item in items:
+        k = key(item)
+        if k not in seen:
+            seen.add(k)
+            unique.append(item)
+    return unique
+
+
 class CrawlOrchestrator:
     """Sequences the ten-phase recon pipeline.
 
@@ -291,6 +313,7 @@ class CrawlOrchestrator:
             "all_urls": [],
             "attack_surface": {},
             "spa": {},
+            "secrets": [],
             "framework_recon": {},
             "debug_exposure": {},
             "browser": {},
@@ -321,12 +344,11 @@ class CrawlOrchestrator:
             recon_hooks = {"request": [make_auth_strip_hook(
                 self.validator.scheme, self.validator.target_domain, set(auth_headers),
             )]}
-        async with httpx.AsyncClient(
-            verify=False,
-            headers=recon_headers,
-            limits=httpx.Limits(max_connections=10),
-            event_hooks=recon_hooks,
+        async with build_client(
             proxy=self.proxy_url,
+            limits=httpx.Limits(max_connections=10),
+            headers=recon_headers,
+            event_hooks=recon_hooks,
         ) as recon_client:
             await self._phase1_recon(recon_client)
             await self._phase15_path_probe(recon_client)
@@ -364,9 +386,10 @@ class CrawlOrchestrator:
                     self.seed_urls.append(surl)
             print_status(f"Added {len(self.seed_urls) - 1} sitemap URLs as seeds")
 
-        # Add robots.txt paths as seeds
+        # Add robots.txt paths as seeds (Disallow rules are patterns; only
+        # their literal prefix is a real path — see robots_seed_paths)
         robots_disallowed = self.results.get("robots_txt", {}).get("disallowed", [])
-        for path in robots_disallowed:
+        for path in robots_seed_paths(robots_disallowed):
             full_url = f"{self.validator.base_url}{path}"
             if self.validator.is_in_scope(full_url):
                 self.seed_urls.append(full_url)
@@ -405,7 +428,18 @@ class CrawlOrchestrator:
                 follow_redirects=True,
                 timeout=httpx.Timeout(10),
             )
-            self.landing_html = landing_resp.text or ""
+            if landing_resp.status_code == 429 or landing_resp.status_code >= 500:
+                # Still rate-limited / erroring after the client's retries.
+                # An error page is not the app: fingerprinting it or mining it
+                # for SPA bundles gives wrong, run-to-run-different answers.
+                print_finding(
+                    "Landing",
+                    f"[bold red]WARNING:[/bold red] landing page answered "
+                    f"{landing_resp.status_code}; skipping body-based detection "
+                    "(lower --threads / raise crawler.delay if the target rate-limits)",
+                )
+            else:
+                self.landing_html = landing_resp.text or ""
         except Exception as e:
             print_finding("Landing", f"Could not fetch landing HTML: {e}")
 
@@ -471,15 +505,19 @@ class CrawlOrchestrator:
                 "rerun with --spa to mine bundles, routes, and secrets",
             )
 
-        # Add SPA-discovered routes to the crawl seed list
+        # Add SPA-discovered routes to the crawl seed list. Parameterised
+        # routes (/users/:id, /posts/[slug], /docs/*) stay in the report but
+        # aren't crawled: the literal ":id" URL is not a page.
+        added = 0
         for route in self.results["spa"].get("routes", []):
+            if _PARAM_ROUTE.search(route["path"]):
+                continue
             route_url = f"{self.validator.base_url}{route['path']}"
             if self.validator.is_in_scope(route_url):
                 self.seed_urls.append(route_url)
-        if self.results["spa"].get("routes"):
-            print_status(
-                f"Added {len(self.results['spa']['routes'])} SPA route(s) as crawl seeds"
-            )
+                added += 1
+        if added:
+            print_status(f"Added {added} SPA route(s) as crawl seeds")
 
     async def _phase19_browser(self) -> None:
         # ─── Phase 1.9: Browser crawl (--browser) ────────────────
@@ -512,7 +550,9 @@ class CrawlOrchestrator:
                 and self.extractor.API_INDICATORS.search(url)
             ):
                 self.seed_urls.append(url)
-        self.seed_urls = list(set(self.seed_urls))
+        # Ordered dedupe: set() order changes per process (hash seed), which
+        # made crawl order — and every "first wins" result — differ per run.
+        self.seed_urls = list(dict.fromkeys(self.seed_urls))
         self.crawl_results = await self.spider.crawl(self.seed_urls)
         self.crawl_results.update(self.browser_pages)
 
@@ -520,8 +560,8 @@ class CrawlOrchestrator:
         # ─── Phase 3: Extract & Analyze ─────────────────────────────
         print_section("PHASE 3: Extraction & Analysis")
 
-        self.all_urls = list(self.crawl_results.keys())
-        self.results["all_urls"] = sorted(self.all_urls)
+        self.all_urls = sorted(self.crawl_results)
+        self.results["all_urls"] = list(self.all_urls)
         all_emails = set()
         self.all_forms = []
         all_api_endpoints = []
@@ -533,64 +573,37 @@ class CrawlOrchestrator:
         # framework flag — it's the universal "did the server leak debug
         # info in an error response?" check.
         stacktrace_findings: list[tuple[str, dict]] = []
+        crawl_secrets: list[dict] = []
 
         recon_cfg = self.config.get("recon", {})
         extract_cfg = self.config.get("extract", {})
 
-        for url, crawl_result in self.crawl_results.items():
-            if crawl_result.error or not crawl_result.body:
+        want_forms = extract_cfg.get("forms", True)
+        want_comments = extract_cfg.get("comments", True)
+        want_js_eps = extract_cfg.get("js_endpoints", True)
+        want_secrets = extract_cfg.get("secrets", True)
+        want_auth = recon_cfg.get("auth_detection", True)
+        rate_limited = 0
+
+        # Sorted so every "first wins" result (dedup winners, debug_exposure
+        # scalars, comment order) is the same run to run; crawl_results is
+        # in fetch-completion order.
+        for url, crawl_result in sorted(self.crawl_results.items()):
+            if crawl_result.error:
+                continue
+            if crawl_result.status_code == 429:
+                # Still rate-limited after retries: the body is the limiter's
+                # error page and its headers aren't the app's.
+                rate_limited += 1
                 continue
 
             body = crawl_result.body
             headers = crawl_result.headers
+            content_type = crawl_result.content_type or headers.get("content-type", "")
+            is_js = is_js_content_type(content_type) or url.split("?", 1)[0].endswith((".js", ".mjs"))
 
-            # Stack-trace miner — empty dict for clean pages, populated
-            # dict for pages with debug/framework/ignition signals.
-            st = mine_response(body)
-            if st:
-                stacktrace_findings.append((url, st))
-
-            # Extract forms
-            if extract_cfg.get("forms", True):
-                forms = self.html_parser.extract_forms(body, url)
-                self.all_forms.extend(forms)
-
-            # Extract comments
-            if extract_cfg.get("comments", True):
-                comments = self.html_parser.extract_comments(body, url)
-                all_comments.extend(comments)
-
-            # Extract emails
-            if extract_cfg.get("emails", True):
-                emails = self.html_parser.extract_emails(body)
-                all_emails.update(emails)
-
-            # Extract API endpoints from URL/response
-            if extract_cfg.get("api_endpoints", True):
-                apis = self.extractor.extract_api_endpoints(url, headers, body)
-                all_api_endpoints.extend(apis)
-
-            # Extract JS endpoints
-            if extract_cfg.get("js_endpoints", True):
-                scripts = self.html_parser.extract_scripts(body)
-                for inline_js in scripts.get("inline", []):
-                    js_eps = self.extractor.extract_js_endpoints(inline_js, url)
-                    all_js_endpoints.extend(js_eps)
-
-            # Detect auth mechanisms + security headers (separate taxonomies)
-            if recon_cfg.get("auth_detection", True):
-                if extract_cfg.get("forms"):
-                    page_forms = [f for f in self.all_forms if f["found_on"] == url]
-                else:
-                    page_forms = self.html_parser.extract_forms(body, url)
-                auth = self.recon.detect_auth_mechanisms(
-                    url, headers, body, page_forms,
-                    set_cookies=getattr(crawl_result, "set_cookies", None),
-                )
-                all_auth.extend(auth)
-                all_security_headers.extend(self.recon.detect_security_headers(url, headers))
-
-            # Track interesting files
+            # Header-level evidence needs no body: a binary /backup.sql or an
+            # empty 401 + WWW-Authenticate still counts.
             if self.validator.is_interesting_file(url):
                 self.results["interesting_files"].append({
                     "url": url,
@@ -598,19 +611,80 @@ class CrawlOrchestrator:
                     "content_type": crawl_result.content_type,
                 })
 
+            page_forms: list[dict] = []
+
+            # Baked secrets in JS the spider fetched (any page, no --spa).
+            if body and want_secrets and is_js:
+                crawl_secrets.extend(extract_secrets(body, url, source="js"))
+
+            # application/javascript bodies are captured only for the secret
+            # scan above; keep them out of the HTML-oriented extractors so
+            # forms/comments/emails/stack-traces don't change.
+            if body and not is_non_text_js_content_type(content_type):
+                # Stack-trace miner — empty dict for clean pages, populated
+                # dict for pages with debug/framework/ignition signals.
+                st = mine_response(body)
+                if st:
+                    stacktrace_findings.append((url, st))
+
+                # One DOM parse shared by every extractor below.
+                doc = self.html_parser.parse(body)
+
+                if want_forms or want_auth:
+                    page_forms = self.html_parser.extract_forms(doc, url)
+                    if want_forms:
+                        self.all_forms.extend(page_forms)
+
+                if want_comments:
+                    all_comments.extend(self.html_parser.extract_comments(doc, url))
+
+                if extract_cfg.get("emails", True):
+                    all_emails.update(self.html_parser.extract_emails(body))
+
+                # Extract API endpoints from URL/response
+                if extract_cfg.get("api_endpoints", True):
+                    all_api_endpoints.extend(self.extractor.extract_api_endpoints(url, headers, body))
+
+                # Extract JS endpoints + inline-script secrets (covers
+                # __NEXT_DATA__ / __NUXT__ and the --browser rendered DOM)
+                want_inline_secrets = want_secrets and not is_js
+                if want_js_eps or want_inline_secrets:
+                    for inline_js in self.html_parser.extract_scripts(doc).get("inline", []):
+                        if want_js_eps:
+                            all_js_endpoints.extend(self.extractor.extract_js_endpoints(inline_js, url))
+                        if want_inline_secrets:
+                            crawl_secrets.extend(extract_secrets(inline_js, url, source="inline"))
+
+            # Detect auth mechanisms + security headers (separate taxonomies)
+            if want_auth:
+                all_auth.extend(self.recon.detect_auth_mechanisms(
+                    url, headers, body, page_forms,
+                    set_cookies=getattr(crawl_result, "set_cookies", None),
+                ))
+                all_security_headers.extend(self.recon.detect_security_headers(url, headers))
+
+        if rate_limited:
+            print_finding(
+                "Crawl",
+                f"[bold red]WARNING:[/bold red] {rate_limited} page(s) still rate-limited (429) "
+                "after retries and left out of the analysis — lower --threads or raise "
+                "crawler.delay",
+            )
+
         # Deduplicate API endpoints (includes SPA-mined and browser-seen endpoints)
         spa_endpoints = self.results.get("spa", {}).get("api_endpoints_from_bundles", [])
         browser_endpoints = [
             {"url": c["url"], "source": f"browser:{c['type']}"}
             for c in self.results["browser"].get("api_calls", [])
         ]
-        seen_apis = set()
-        self.unique_apis = []
-        for api in all_api_endpoints + all_js_endpoints + spa_endpoints + browser_endpoints:
-            key = api.get("url", "")
-            if key not in seen_apis:
-                seen_apis.add(key)
-                self.unique_apis.append(api)
+        self.unique_apis = _dedupe(
+            all_api_endpoints + all_js_endpoints + spa_endpoints + browser_endpoints,
+            key=lambda api: api.get("url", ""),
+        )
+
+        self.results["secrets"] = merge_secrets(
+            self.results.get("spa", {}).get("secrets", []), crawl_secrets
+        )
 
         self.results["forms"] = self.all_forms
         self.results["api_endpoints"] = self.unique_apis
@@ -655,28 +729,15 @@ class CrawlOrchestrator:
                             break
 
         # Deduplicate auth mechanisms
-        seen_auth = set()
-        unique_auth = []
-        for a in all_auth:
-            key = f"{a['type']}:{a.get('url', '')}:{a.get('detail', '')[:50]}"
-            if key not in seen_auth:
-                seen_auth.add(key)
-                unique_auth.append(a)
-        self.results["auth_mechanisms"] = unique_auth
+        self.results["auth_mechanisms"] = _dedupe(
+            all_auth, key=lambda a: (a["type"], a.get("url", ""), a.get("detail", "")[:50]),
+        )
 
-        # Deduplicate security headers — same header on same URL with same value
-        # is a single finding regardless of how many times we saw it. Collapse
-        # across URLs at presentation time but keep one entry per (header, value)
-        # to give the operator one snapshot rather than a per-URL flood.
-        seen_sh: set[tuple[str, str]] = set()
-        unique_security_headers = []
-        for sh in all_security_headers:
-            key = (sh.get("header", ""), sh.get("value", ""))
-            if key in seen_sh:
-                continue
-            seen_sh.add(key)
-            unique_security_headers.append(sh)
-        self.results["security_headers"] = unique_security_headers
+        # Deduplicate security headers — one entry per (header, value) gives
+        # the operator one snapshot rather than a per-URL flood.
+        self.results["security_headers"] = _dedupe(
+            all_security_headers, key=lambda sh: (sh.get("header", ""), sh.get("value", "")),
+        )
 
         # File uploads
         self.results["file_uploads"] = [f for f in self.all_forms if f.get("has_file_upload")]
@@ -691,9 +752,13 @@ class CrawlOrchestrator:
         forms_by_url: dict[str, list[dict]] = {}
         for f in self.all_forms:
             forms_by_url.setdefault(f.get("found_on", ""), []).append(f)
-        crawl_detections = self.fingerprinter.fingerprint_aggregate(
-            self.crawl_results, forms_by_url=forms_by_url,
-        )
+        # Sorted for stable evidence order; 429 pages are the rate limiter's
+        # error page, not the app, so they're not fingerprinted.
+        pages = {
+            url: result for url, result in sorted(self.crawl_results.items())
+            if result.status_code != 429
+        }
+        crawl_detections = self.fingerprinter.fingerprint_aggregate(pages, forms_by_url=forms_by_url)
 
         # Append all crawl detections and run one unified dedup pass —
         # avoids the bug where Phase 4's inline merge silently dropped

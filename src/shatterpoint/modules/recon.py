@@ -5,12 +5,37 @@ and authentication mechanism detection.
 """
 
 import re
+from urllib.parse import urljoin, urlparse
 from xml.etree import ElementTree
 
 import httpx
 
-from shatterpoint.utils.baseline import Baseline, fetch_baseline
+from shatterpoint.utils.baseline import REDIRECT_CODES, Baseline, fetch_baseline
 from shatterpoint.utils.formatter import print_finding, print_status
+from shatterpoint.utils.http import parse_set_cookies
+
+# Sitemap indexes can nest; real sites go 1–2 levels deep.
+_SITEMAP_MAX_DEPTH = 3
+
+
+def robots_seed_paths(disallowed: list[str]) -> list[str]:
+    """Turn robots.txt Disallow rules into crawlable paths.
+
+    Rules are patterns, not URLs: `/admin/*.php$` means "anything under
+    /admin/ ending .php". The literal prefix before the first `*` / `$` is
+    the part that exists, so that's what gets crawled. A missing leading
+    slash is added; empty and duplicate results are dropped.
+    """
+    paths: list[str] = []
+    for rule in disallowed:
+        prefix = re.split(r"[*$]", rule, maxsplit=1)[0].strip()
+        if not prefix:
+            continue
+        if not prefix.startswith("/"):
+            prefix = "/" + prefix
+        if prefix not in paths:
+            paths.append(prefix)
+    return paths
 
 
 class ReconModule:
@@ -80,7 +105,9 @@ class ReconModule:
             results["robots_txt"] = await self.parse_robots(client)
 
         if self.config.get("sitemap_xml", True):
-            results["sitemap"] = await self.parse_sitemap(client)
+            # Sitemaps named in robots.txt are tried before the defaults.
+            listed = (results.get("robots_txt") or {}).get("sitemaps", [])
+            results["sitemap"] = await self.parse_sitemap(client, extra_urls=listed)
 
         if self.config.get("security_txt", True):
             results["security_txt"] = await self.check_security_txt(client)
@@ -144,77 +171,100 @@ class ReconModule:
 
         return result
 
-    async def parse_sitemap(self, client: httpx.AsyncClient, sitemap_url: str | None = None) -> dict:
-        """Parse sitemap.xml and extract all URLs."""
+    def _in_scope(self, url: str) -> bool:
+        return urlparse(url).netloc.lower() == urlparse(self.base_url).netloc.lower()
+
+    async def parse_sitemap(
+        self,
+        client: httpx.AsyncClient,
+        sitemap_url: str | None = None,
+        extra_urls: list[str] | None = None,
+    ) -> dict:
+        """Find the target's sitemap and extract all page URLs.
+
+        Candidates, in order: `sitemap_url`, `extra_urls` (robots.txt
+        `Sitemap:` lines, relative ones resolved), then the default
+        locations. The first that parses as a sitemap wins; sitemap
+        indexes are followed to their in-scope children.
+        """
         result = {
             "found": False,
             "urls": [],
             "url_count": 0,
         }
 
-        urls_to_try = []
-        if sitemap_url:
-            urls_to_try.append(sitemap_url)
-        urls_to_try.extend([
+        candidates = [sitemap_url] if sitemap_url else []
+        candidates += [urljoin(self.base_url + "/", u) for u in (extra_urls or [])]
+        candidates += [
             f"{self.base_url}/sitemap.xml",
             f"{self.base_url}/sitemap_index.xml",
             f"{self.base_url}/sitemap.xml.gz",
-        ])
+        ]
 
-        for url in urls_to_try:
-            try:
-                response = await client.get(
-                    url,
-                    follow_redirects=True,
-                    timeout=httpx.Timeout(10),
-                )
-
-                content_type = response.headers.get("content-type", "")
-                looks_like_xml = (
-                    "xml" in content_type
-                    or response.text.strip().startswith("<?xml")
-                )
-                if response.status_code == 200 and looks_like_xml:
-                    result["found"] = True
-                    print_status(f"Sitemap found: {url}")
-
-                    # Parse XML
-                    try:
-                        root = ElementTree.fromstring(response.text)
-                        # Handle namespace
-                        ns = {"sm": "http://www.sitemaps.org/schemas/sitemap/0.9"}
-
-                        # Check for sitemap index
-                        for sitemap in root.findall(".//sm:sitemap/sm:loc", ns):
-                            if sitemap.text:
-                                # Recursively parse sub-sitemaps
-                                sub = await self.parse_sitemap(client, sitemap.text)
-                                result["urls"].extend(sub.get("urls", []))
-
-                        # Regular sitemap URLs
-                        for url_elem in root.findall(".//sm:url/sm:loc", ns):
-                            if url_elem.text:
-                                result["urls"].append(url_elem.text)
-
-                        # Try without namespace (some sitemaps don't use it)
-                        if not result["urls"]:
-                            for loc in root.iter("loc"):
-                                if loc.text:
-                                    result["urls"].append(loc.text)
-
-                    except ElementTree.ParseError:
-                        # Try regex fallback
-                        locs = re.findall(r'<loc>(.*?)</loc>', response.text)
-                        result["urls"].extend(locs)
-
-                    result["url_count"] = len(result["urls"])
-                    print_status(f"Sitemap contains {result['url_count']} URLs")
-                    break
-
-            except Exception:
+        visited: set[str] = set()
+        for url in dict.fromkeys(candidates):
+            urls = await self._fetch_sitemap(client, url, visited, depth=0)
+            if urls is None:
                 continue
+            result["found"] = True
+            result["urls"] = urls
+            result["url_count"] = len(urls)
+            print_status(f"Sitemap contains {result['url_count']} URLs")
+            break
 
         return result
+
+    async def _fetch_sitemap(
+        self, client: httpx.AsyncClient, url: str, visited: set[str], depth: int,
+    ) -> list[str] | None:
+        """Fetch one sitemap (following index entries). Returns its URLs,
+        or None when `url` isn't a reachable, in-scope sitemap.
+
+        Each sitemap is fetched once (`visited`) and nesting stops at
+        _SITEMAP_MAX_DEPTH, so an index that lists itself — or a child that
+        fails — can't loop. Children never fall back to the default
+        locations (that fallback used to re-enter the index forever).
+        """
+        if url in visited or depth > _SITEMAP_MAX_DEPTH or not self._in_scope(url):
+            return None
+        visited.add(url)
+        try:
+            response = await client.get(url, follow_redirects=True, timeout=httpx.Timeout(10))
+        except Exception:
+            return None
+
+        content_type = response.headers.get("content-type", "")
+        looks_like_xml = "xml" in content_type or response.text.strip().startswith("<?xml")
+        if response.status_code != 200 or not looks_like_xml:
+            return None
+        print_status(f"Sitemap found: {url}")
+
+        urls: list[str] = []
+        try:
+            root = ElementTree.fromstring(response.text)
+            ns = {"sm": "http://www.sitemaps.org/schemas/sitemap/0.9"}
+
+            # Sitemap index → follow each child sitemap
+            for child in root.findall(".//sm:sitemap/sm:loc", ns):
+                if child.text:
+                    sub = await self._fetch_sitemap(client, child.text.strip(), visited, depth + 1)
+                    urls.extend(sub or [])
+
+            # Regular sitemap URLs
+            for url_elem in root.findall(".//sm:url/sm:loc", ns):
+                if url_elem.text:
+                    urls.append(url_elem.text)
+
+            # Try without namespace (some sitemaps don't use it)
+            if not urls:
+                for loc in root.iter("loc"):
+                    if loc.text:
+                        urls.append(loc.text)
+
+        except ElementTree.ParseError:
+            urls.extend(re.findall(r'<loc>(.*?)</loc>', response.text))
+
+        return urls
 
     async def check_security_txt(self, client: httpx.AsyncClient) -> dict:
         """Check for .well-known/security.txt (RFC 9116)."""
@@ -275,11 +325,16 @@ class ReconModule:
                     timeout=httpx.Timeout(5),
                 )
 
+                body = response.text or ""
+                location = response.headers.get("location", "")
+                # Catch-all answers (soft-404 200s, everything → login
+                # redirects, a 401/403 wall in front of every path) say
+                # nothing about this path.
+                if baseline.is_noise(response.status_code, body, location):
+                    baseline_drops += 1
+                    continue
+
                 if response.status_code == 200:
-                    body = response.text or ""
-                    if baseline.matches(response.status_code, body):
-                        baseline_drops += 1
-                        continue
                     content_length = len(body)
                     found.append({
                         "url": url,
@@ -290,13 +345,7 @@ class ReconModule:
                     })
                     print_finding("Path Found", f"[200] {path} ({content_length} bytes)")
 
-                elif response.status_code in (301, 302, 307, 308):
-                    location = response.headers.get("location", "")
-                    # Drop catch-all "everything → login" redirects (e.g.
-                    # GitLab sends every unknown path to /users/sign_in).
-                    if baseline.is_catchall_redirect(response.status_code, location):
-                        baseline_drops += 1
-                        continue
+                elif response.status_code in REDIRECT_CODES:
                     found.append({
                         "url": url,
                         "path": path,
@@ -404,34 +453,26 @@ class ReconModule:
                     "has_csrf": form.get("has_csrf_token", False),
                 })
 
-        # Check for session cookies (these ARE auth-relevant).
-        # Prefer the per-cookie list when provided; fall back to the
-        # joined value in headers["set-cookie"] (legacy path).
-        if set_cookies:
-            cookie_values = list(set_cookies)
-        else:
-            cookie_values = [
-                v for k, v in headers.items() if k.lower() == "set-cookie"
+        # Check for session cookies (these ARE auth-relevant). The session
+        # hint is judged on the cookie NAME and flags on its parsed
+        # attributes — matching the whole Set-Cookie string made
+        # `theme=dark; Path=/authors` a session cookie ("auth" in the path)
+        # and gave a cookie named `insecure_pref` a Secure flag.
+        session_indicators = ["session", "sess", "sid", "auth", "token", "jwt"]
+        for cookie in parse_set_cookies(headers, set_cookies):
+            name_lower = cookie["name"].lower()
+            if not any(ind in name_lower for ind in session_indicators):
+                continue
+            flags = [
+                label
+                for attr, label in (("httponly", "HttpOnly"), ("secure", "Secure"), ("samesite", "SameSite"))
+                if attr in cookie["attrs"]
             ]
-
-        for value in cookie_values:
-            cookie_lower = value.lower()
-            flags = []
-            if "httponly" in cookie_lower:
-                flags.append("HttpOnly")
-            if "secure" in cookie_lower:
-                flags.append("Secure")
-            if "samesite" in cookie_lower:
-                flags.append("SameSite")
-
-            session_indicators = ["session", "sess", "sid", "auth", "token", "jwt"]
-            if any(ind in cookie_lower for ind in session_indicators):
-                cookie_name = value.split("=")[0].strip()
-                auth.append({
-                    "type": "Session Cookie",
-                    "url": url,
-                    "detail": f"Cookie: {cookie_name} | Flags: {', '.join(flags) or 'NONE'}",
-                })
+            auth.append({
+                "type": "Session Cookie",
+                "url": url,
+                "detail": f"Cookie: {cookie['name']} | Flags: {', '.join(flags) or 'NONE'}",
+            })
 
         return auth
 

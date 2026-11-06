@@ -10,9 +10,26 @@ from dataclasses import dataclass, field
 
 import httpx
 
+from shatterpoint.modules.parser import HTMLParser
 from shatterpoint.utils.auth import build_auth_headers, should_send_auth
 from shatterpoint.utils.formatter import print_finding, print_status
+from shatterpoint.utils.http import build_client
 from shatterpoint.utils.validator import URLValidator
+
+
+def is_js_content_type(content_type: str) -> bool:
+    """True for any JavaScript MIME type (text/ or application/)."""
+    ct = (content_type or "").lower()
+    return "javascript" in ct or "ecmascript" in ct
+
+
+def is_non_text_js_content_type(content_type: str) -> bool:
+    """JS served under a non-text/ type (application/javascript, …).
+
+    These bodies used to be dropped; they're now captured for secret mining
+    only and skipped by every HTML-oriented extractor and link parser.
+    """
+    return is_js_content_type(content_type) and "text/" not in (content_type or "").lower()
 
 
 @dataclass
@@ -32,6 +49,9 @@ class CrawlResult:
     redirect_chain: list = field(default_factory=list)
     response_time: float = 0.0
     error: str | None = None
+    # Where the body actually came from after in-scope redirects. Relative
+    # links on the page resolve against this, not the requested URL.
+    final_url: str = ""
 
 
 class Spider:
@@ -74,6 +94,10 @@ class Spider:
         self.queued: set[str] = set()
         self.results: dict[str, CrawlResult] = {}
         self.pages_crawled = 0
+        # Fetch slots handed out. Checked before fetching so concurrent
+        # workers can't overshoot max_pages (pages_crawled lags in-flight).
+        self._slots_taken = 0
+        self._html_parser = HTMLParser()
 
         # Semaphore for concurrency control
         self._semaphore = asyncio.Semaphore(self.concurrency)
@@ -106,16 +130,15 @@ class Spider:
         print_status(f"Starting crawl from {len(seed_urls)} seed URL(s)")
         print_status(f"Concurrency: {self.concurrency} | Max depth: {self.max_depth} | Max pages: {self.max_pages}")
 
-        async with httpx.AsyncClient(
-            follow_redirects=False,  # We handle redirects manually to track chains
-            timeout=httpx.Timeout(self.timeout),
-            verify=False,  # OSCP targets often have self-signed certs
-            headers={"User-Agent": self.user_agent},
+        async with build_client(
+            proxy=self.proxy_url,
             limits=httpx.Limits(
                 max_connections=self.concurrency + 5,
                 max_keepalive_connections=self.concurrency,
             ),
-            proxy=self.proxy_url,
+            follow_redirects=False,  # We handle redirects manually to track chains
+            timeout=httpx.Timeout(self.timeout),
+            headers={"User-Agent": self.user_agent},
         ) as client:
             workers = []
             for _ in range(self.concurrency):
@@ -142,12 +165,13 @@ class Spider:
             try:
                 if url in self.visited:
                     continue
-                if self.pages_crawled >= self.max_pages:
+                if self._slots_taken >= self.max_pages:
                     continue
                 if depth > self.max_depth:
                     continue
 
                 self.visited.add(url)
+                self._slots_taken += 1
 
                 async with self._semaphore:
                     result = await self._fetch(client, url)
@@ -158,14 +182,23 @@ class Spider:
                 if self.pages_crawled % 25 == 0:
                     print_status(f"Progress: {self.pages_crawled} pages crawled...")
 
-                # Extract links and add to queue
-                if result.body and result.status_code < 400:
-                    from shatterpoint.modules.parser import HTMLParser
-                    parser = HTMLParser()
-                    links = parser.extract_links(result.body, url)
+                # Extract links and add to queue. Links on a page at max_depth
+                # are not queued: queuing them only to drop them on dequeue
+                # used to mark them `queued`, so a page first seen too deep
+                # was never crawled even when later linked from a shallower one.
+                # application/javascript bodies are kept only for secret mining
+                # (Phase 3). text/javascript was always kept and link-parsed;
+                # that path is left untouched so crawl scope doesn't move.
+                if (
+                    result.body and result.status_code < 400
+                    and depth < self.max_depth
+                    and not is_non_text_js_content_type(result.content_type)
+                ):
+                    page_url = result.final_url or url
+                    links = self._html_parser.extract_links(result.body, page_url)
 
                     for link in links:
-                        normalized = self.validator.normalize(link, url)
+                        normalized = self.validator.normalize(link, page_url)
                         if (
                             normalized
                             and normalized not in self.visited
@@ -205,19 +238,26 @@ class Spider:
                     location = response.headers.get("location", "")
                     resolved = self.validator.normalize(location, current_url)
                     if resolved:
-                        redirect_chain.append({
-                            "from": current_url,
-                            "to": resolved,
-                            "status": response.status_code,
-                        })
-                        current_url = resolved
-                        hops += 1
-                        continue
+                        hop = {"from": current_url, "to": resolved, "status": response.status_code}
+                        # Never follow a redirect off the target: that host is
+                        # out of scope, and its body would be reported (forms,
+                        # emails, secrets, links) as if it were the target's.
+                        if not self.validator.is_in_scope(resolved):
+                            hop["out_of_scope"] = True
+                            redirect_chain.append(hop)
+                        else:
+                            redirect_chain.append(hop)
+                            current_url = resolved
+                            hops += 1
+                            continue
 
                 # Final response
                 content_type = response.headers.get("content-type", "")
                 body = ""
-                if "text/" in content_type or "json" in content_type or "xml" in content_type:
+                if (
+                    "text/" in content_type or "json" in content_type or "xml" in content_type
+                    or is_js_content_type(content_type)
+                ):
                     body = response.text
 
                 # Preserve all Set-Cookie values as a list. Casting to
@@ -237,6 +277,7 @@ class Spider:
                     content_type=content_type,
                     redirect_chain=redirect_chain,
                     response_time=elapsed,
+                    final_url=current_url,
                 )
 
             except httpx.TimeoutException:

@@ -353,16 +353,6 @@ def print_summary(results: dict):
                 tree.add(f"[bold white]{service}[/bold white]: {', '.join(methods)}")
             console.print(tree)
 
-        secrets = spa.get("secrets", [])
-        if secrets:
-            table = Table(title=f"Baked Secrets ({len(secrets)})", box=box.ROUNDED, border_style="red")
-            table.add_column("Type", style="bold red")
-            table.add_column("Value (redacted)", style="yellow")
-            table.add_column("Bundle", style="dim")
-            for s in secrets[:30]:
-                table.add_row(s.get("type", ""), s.get("value_redacted", ""), s.get("bundle", ""))
-            console.print(table)
-
         chunks = spa.get("chunks", [])
         if chunks:
             console.print(f"[bold magenta]SPA Chunks:[/bold magenta] {len(chunks)} (depth-1)")
@@ -370,6 +360,22 @@ def print_summary(results: dict):
         state = spa.get("state_dumps", {})
         if state:
             console.print(f"[bold magenta]State dumps:[/bold magenta] {', '.join(state.keys())}")
+
+    # Baked secrets — SPA bundles/source maps plus inline and crawled JS.
+    # Older reports only had spa.secrets, so fall back to it.
+    secrets = results.get("secrets") or results.get("spa", {}).get("secrets", [])
+    if secrets:
+        table = Table(title=f"Baked Secrets ({len(secrets)})", box=box.ROUNDED, border_style="red")
+        table.add_column("Type", style="bold red")
+        table.add_column("Value (redacted)", style="yellow")
+        table.add_column("Found in", style="dim")
+        table.add_column("Source", style="cyan")
+        for s in secrets[:30]:
+            table.add_row(
+                s.get("type", ""), s.get("value_redacted", ""),
+                s.get("bundle", ""), s.get("source", "bundle"),
+            )
+        console.print(table)
 
     # Browser crawl (--browser). Backend calls are in the API Endpoints table.
     browser = results.get("browser", {})
